@@ -1,6 +1,8 @@
 [Stric](https://github.com/bunsvr) is a minimalist, fast web framework for Bun.
 
-```ts#index.ts
+{% codetabs %}
+
+```ts#app.ts
 import { App } from "@stricjs/core";
 
 // Export the fetch handler and serve with Bun
@@ -9,7 +11,25 @@ export default new App()
   .use(() => new Response("Hi!"));
 ```
 
-Stric provides support for [ArrowJS](https://www.arrow-js.com), a library for building reactive interfaces in **native** JavaScript. 
+```ts#router.ts
+import { Router } from "@stricjs/router";
+
+// Create a router and serve using Bun
+export default new Router()
+  // Handle GET request to `/`
+  .get("/", () => new Response("Hi"))
+  // Handle POST request to `/json`
+  .post("/json", async req => Response.json(await req.json()))
+  // Return 90 for requests to `/id/90` for instance
+  .get("/id/:id", req => new Response(req.params.id))
+  // Use the default 404 handler
+  .use(404);
+```
+
+{% /codetabs %}
+
+[Stric](https://github.com/bunsvr) is one of the fastest Bun web frameworks. See the benchmark [here](https://github.com/bunsvr/benchmark/blob/main/results/index.md).
+Stric also provides support for [ArrowJS](https://www.arrow-js.com), a library for building reactive interfaces in **native** JavaScript. 
 
 {% codetabs %}
 
