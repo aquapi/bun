@@ -191,6 +191,11 @@ pub extern fn JSC__JSGlobalObject__queueMicrotaskJob(arg0: *bindings.JSGlobalObj
 pub extern fn JSC__JSGlobalObject__reload(arg0: *bindings.JSGlobalObject) void;
 pub extern fn JSC__JSGlobalObject__startRemoteInspector(arg0: *bindings.JSGlobalObject, arg1: [*c]u8, arg2: u16) bool;
 pub extern fn JSC__JSGlobalObject__vm(arg0: *bindings.JSGlobalObject) *bindings.VM;
+pub extern fn JSC__JSMap__create(arg0: *bindings.JSGlobalObject) JSC__JSValue;
+pub extern fn JSC__JSMap__get_(arg0: ?*bindings.JSMap, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue) JSC__JSValue;
+pub extern fn JSC__JSMap__has(arg0: ?*bindings.JSMap, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue) bool;
+pub extern fn JSC__JSMap__remove(arg0: ?*bindings.JSMap, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue) bool;
+pub extern fn JSC__JSMap__set(arg0: ?*bindings.JSMap, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue, JSValue3: JSC__JSValue) void;
 pub extern fn JSC__JSValue___then(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue, ArgFn3: ?*const fn (*bindings.JSGlobalObject, *bindings.CallFrame) callconv(.C) JSC__JSValue, ArgFn4: ?*const fn (*bindings.JSGlobalObject, *bindings.CallFrame) callconv(.C) JSC__JSValue) void;
 pub extern fn JSC__JSValue__asArrayBuffer_(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, arg2: ?*Bun__ArrayBuffer) bool;
 pub extern fn JSC__JSValue__asBigIntCompare(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue) u8;
@@ -226,7 +231,7 @@ pub extern fn JSC__JSValue__getClassName(JSValue0: JSC__JSValue, arg1: *bindings
 pub extern fn JSC__JSValue__getErrorsProperty(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject) JSC__JSValue;
 pub extern fn JSC__JSValue__getIfPropertyExistsFromPath(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, JSValue2: JSC__JSValue) JSC__JSValue;
 pub extern fn JSC__JSValue__getIfPropertyExistsImpl(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, arg2: [*c]const u8, arg3: u32) JSC__JSValue;
-pub extern fn JSC__JSValue__getLengthOfArray(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject) u64;
+pub extern fn JSC__JSValue__getLengthIfPropertyExistsInternal(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject) f64;
 pub extern fn JSC__JSValue__getNameProperty(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, arg2: [*c]ZigString) void;
 pub extern fn JSC__JSValue__getPrototype(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject) JSC__JSValue;
 pub extern fn JSC__JSValue__getSymbolDescription(JSValue0: JSC__JSValue, arg1: *bindings.JSGlobalObject, arg2: [*c]ZigString) void;

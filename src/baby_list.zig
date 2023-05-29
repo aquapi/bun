@@ -65,13 +65,22 @@ pub fn BabyList(comptime Type: type) type {
             };
         }
 
-        pub inline fn appendAssumeCapacity(this: *@This(), value: Type) void {
+        pub fn appendAssumeCapacity(this: *@This(), value: Type) void {
             this.ptr[this.len] = value;
             this.len += 1;
             std.debug.assert(this.cap >= this.len);
         }
 
-        pub inline fn appendSliceAssumeCapacity(this: *@This(), values: []const Type) void {
+        pub fn writableSlice(this: *@This(), allocator: std.mem.Allocator, cap: usize) ![]Type {
+            var list_ = this.listManaged(allocator);
+            try list_.ensureUnusedCapacity(cap);
+            var writable = list_.items.ptr[this.len .. this.len + @truncate(u32, cap)];
+            list_.items.len += cap;
+            this.update(list_);
+            return writable;
+        }
+
+        pub fn appendSliceAssumeCapacity(this: *@This(), values: []const Type) void {
             var tail = this.ptr[this.len .. this.len + values.len];
             std.debug.assert(this.cap >= this.len + @truncate(u32, values.len));
             bun.copy(Type, tail, values);
@@ -79,16 +88,19 @@ pub fn BabyList(comptime Type: type) type {
             std.debug.assert(this.cap >= this.len);
         }
 
-        pub inline fn initCapacity(allocator: std.mem.Allocator, len: usize) !ListType {
-            var items = try allocator.alloc(Type, len);
+        pub fn initCapacity(allocator: std.mem.Allocator, len: usize) !ListType {
+            return initWithBuffer(try allocator.alloc(Type, len));
+        }
+
+        pub fn initWithBuffer(buffer: []Type) ListType {
             return ListType{
-                .ptr = @ptrCast([*]Type, items.ptr),
+                .ptr = buffer.ptr,
                 .len = 0,
-                .cap = @truncate(u32, len),
+                .cap = @truncate(u32, buffer.len),
             };
         }
 
-        pub inline fn init(items: []const Type) ListType {
+        pub fn init(items: []const Type) ListType {
             @setRuntimeSafety(false);
             return ListType{
                 .ptr = @constCast(items.ptr),
@@ -97,7 +109,7 @@ pub fn BabyList(comptime Type: type) type {
             };
         }
 
-        pub inline fn fromList(list_: anytype) ListType {
+        pub fn fromList(list_: anytype) ListType {
             if (comptime @TypeOf(list_) == ListType) {
                 return list_;
             }
@@ -117,7 +129,7 @@ pub fn BabyList(comptime Type: type) type {
             };
         }
 
-        pub inline fn fromSlice(allocator: std.mem.Allocator, items: []const Elem) !ListType {
+        pub fn fromSlice(allocator: std.mem.Allocator, items: []const Elem) !ListType {
             var allocated = try allocator.alloc(Elem, items.len);
             bun.copy(Elem, allocated, items);
 

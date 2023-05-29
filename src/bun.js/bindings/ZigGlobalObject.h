@@ -1,5 +1,8 @@
+// ** WARNING **
 // This header is included in nearly every file.
-// Be very cautious of sticking your #include in this file.
+// Be very cautious of sticking your #include in this file
+// or adding anything into this file other than LazyClassStructure or LazyProperty
+// ** WARNING **
 // TODO: rename this to BunGlobalObject
 #pragma once
 
@@ -34,7 +37,7 @@ class DOMWrapperWorld;
 #include "JavaScriptCore/JSGlobalObject.h"
 #include "JavaScriptCore/JSTypeInfo.h"
 #include "JavaScriptCore/Structure.h"
-#include "WebCoreJSBuiltinInternals.h"
+#include "WebCoreJSBuiltins.h"
 
 #include "DOMConstructors.h"
 #include "BunPlugin.h"
@@ -48,6 +51,7 @@ extern "C" void Bun__reportUnhandledError(JSC__JSGlobalObject*, JSC::EncodedJSVa
 // defined in ModuleLoader.cpp
 extern "C" JSC::EncodedJSValue jsFunctionOnLoadObjectResultResolve(JSC::JSGlobalObject* globalObject, JSC::CallFrame* callFrame);
 extern "C" JSC::EncodedJSValue jsFunctionOnLoadObjectResultReject(JSC::JSGlobalObject* globalObject, JSC::CallFrame* callFrame);
+
 // #include "EventTarget.h"
 
 // namespace WebCore {
@@ -225,6 +229,10 @@ public:
     JSC::JSObject* JSReadableState() { return m_JSReadableStateClassStructure.constructorInitializedOnMainThread(this); }
     JSC::JSValue JSReadableStatePrototype() { return m_JSReadableStateClassStructure.prototypeInitializedOnMainThread(this); }
 
+    JSC::Structure* NodeVMScriptStructure() { return m_NodeVMScriptClassStructure.getInitializedOnMainThread(this); }
+    JSC::JSObject* NodeVMScript() { return m_NodeVMScriptClassStructure.constructorInitializedOnMainThread(this); }
+    JSC::JSValue NodeVMScriptPrototype() { return m_NodeVMScriptClassStructure.prototypeInitializedOnMainThread(this); }
+
     JSC::JSMap* readableStreamNativeMap() { return m_lazyReadableStreamPrototypeMap.getInitializedOnMainThread(this); }
     JSC::JSMap* requireMap() { return m_requireMap.getInitializedOnMainThread(this); }
     JSC::Structure* encodeIntoObjectStructure() { return m_encodeIntoObjectStructure.getInitializedOnMainThread(this); }
@@ -242,9 +250,18 @@ public:
     Structure* requireResolveFunctionStructure() { return m_requireResolveFunctionStructure.getInitializedOnMainThread(this); }
     JSObject* requireResolveFunctionPrototype() { return m_resolveFunctionPrototype.getInitializedOnMainThread(this); }
 
+    JSObject* lazyRequireCacheObject() { return m_lazyRequireCacheObject.getInitializedOnMainThread(this); }
+
     JSFunction* bunSleepThenCallback() { return m_bunSleepThenCallback.getInitializedOnMainThread(this); }
 
     JSObject* dnsObject() { return m_dnsObject.getInitializedOnMainThread(this); }
+
+    Structure* globalObjectStructure() { return m_cachedGlobalObjectStructure.getInitializedOnMainThread(this); }
+    Structure* globalProxyStructure() { return m_cachedGlobalProxyStructure.getInitializedOnMainThread(this); }
+    JSObject* lazyTestModuleObject() { return m_lazyTestModuleObject.getInitializedOnMainThread(this); }
+    JSObject* lazyPreloadTestModuleObject() { return m_lazyPreloadTestModuleObject.getInitializedOnMainThread(this); }
+
+    JSWeakMap* vmModuleContextMap() { return m_vmModuleContextMap.getInitializedOnMainThread(this); }
 
     JSC::JSObject* processObject()
     {
@@ -419,6 +436,7 @@ private:
     LazyClassStructure m_NapiClassStructure;
     LazyClassStructure m_callSiteStructure;
     LazyClassStructure m_JSBufferClassStructure;
+    LazyClassStructure m_NodeVMScriptClassStructure;
 
     /**
      * WARNING: You must update visitChildrenImpl() if you add a new field.
@@ -451,7 +469,14 @@ private:
     LazyProperty<JSGlobalObject, JSC::Structure> m_requireResolveFunctionStructure;
     LazyProperty<JSGlobalObject, JSObject> m_resolveFunctionPrototype;
     LazyProperty<JSGlobalObject, JSObject> m_dnsObject;
+    LazyProperty<JSGlobalObject, JSWeakMap> m_vmModuleContextMap;
+    LazyProperty<JSGlobalObject, JSObject> m_lazyRequireCacheObject;
+    LazyProperty<JSGlobalObject, JSObject> m_lazyTestModuleObject;
+    LazyProperty<JSGlobalObject, JSObject> m_lazyPreloadTestModuleObject;
+
     LazyProperty<JSGlobalObject, JSFunction> m_bunSleepThenCallback;
+    LazyProperty<JSGlobalObject, Structure> m_cachedGlobalObjectStructure;
+    LazyProperty<JSGlobalObject, Structure> m_cachedGlobalProxyStructure;
 
     DOMGuardedObjectSet m_guardedObjects WTF_GUARDED_BY_LOCK(m_gcLock);
     void* m_bunVM;

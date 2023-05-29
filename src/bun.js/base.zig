@@ -11,8 +11,6 @@ const stringZ = bun.stringZ;
 const default_allocator = bun.default_allocator;
 const C = bun.C;
 const JavaScript = @import("./javascript.zig");
-const ResolveError = JavaScript.ResolveError;
-const BuildError = JavaScript.BuildError;
 const JSC = @import("root").bun.JSC;
 const WebCore = @import("./webcore.zig");
 const Test = @import("./test/jest.zig");
@@ -1763,10 +1761,11 @@ pub const ArrayBuffer = extern struct {
         return Stream{ .pos = 0, .buf = this.slice() };
     }
 
-    pub fn create(globalThis: *JSC.JSGlobalObject, bytes: []const u8, comptime kind: JSC.JSValue.JSType) JSValue {
+    pub fn create(globalThis: *JSC.JSGlobalObject, bytes: []const u8, comptime kind: BinaryType) JSValue {
         JSC.markBinding(@src());
         return switch (comptime kind) {
             .Uint8Array => Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len, false),
+            .Buffer => Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len, true),
             .ArrayBuffer => Bun__createArrayBufferForCopy(globalThis, bytes.ptr, bytes.len),
             else => @compileError("Not implemented yet"),
         };
@@ -2129,7 +2128,7 @@ pub const ExternalBuffer = struct {
     }
 
     pub fn toJS(this: *ExternalBuffer, ctx: *JSC.JSGlobalObject) JSC.JSValue {
-        return JSC.JSValue.createBufferWithCtx(ctx, this.buf, this.ctx, ExternalBuffer_deallocator);
+        return JSC.JSValue.createBufferWithCtx(ctx, this.buf, this, ExternalBuffer_deallocator);
     }
 
     pub fn toArrayBuffer(this: *ExternalBuffer, ctx: *JSC.JSGlobalObject) JSC.JSValue {
@@ -2200,11 +2199,9 @@ const MD5_SHA1 = JSC.API.Bun.Crypto.MD5_SHA1;
 const FFI = JSC.FFI;
 pub const JSPrivateDataPtr = TaggedPointerUnion(.{
     AttributeIterator,
-    BuildError,
     Comment,
     DebugServer,
     DebugSSLServer,
-    DescribeScope,
     DocEnd,
     DocType,
     Element,
@@ -2215,7 +2212,6 @@ pub const JSPrivateDataPtr = TaggedPointerUnion(.{
     LazyPropertiesObject,
 
     ModuleNamespace,
-    ResolveError,
     Router,
     Server,
 
@@ -2736,8 +2732,10 @@ pub fn wrapWithHasContainer(
             exception: js.ExceptionRef,
         ) js.JSObjectRef {
             var iter = JSC.Node.ArgumentsSlice.from(ctx.bunVM(), arguments);
+            defer iter.deinit();
             var args: Args = undefined;
 
+            comptime var passed_exception_ref = false;
             comptime var i: usize = 0;
             inline while (i < FunctionTypeInfo.params.len) : (i += 1) {
                 const ArgType = comptime FunctionTypeInfo.params[i].type.?;
@@ -2752,12 +2750,10 @@ pub fn wrapWithHasContainer(
                     JSC.Node.StringOrBuffer => {
                         const arg = iter.nextEat() orelse {
                             exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         };
                         args[i] = JSC.Node.StringOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                             exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         };
                     },
@@ -2766,7 +2762,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = JSC.Node.StringOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                                     exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2781,7 +2776,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = JSC.Node.SliceOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                                     exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2795,12 +2789,10 @@ pub fn wrapWithHasContainer(
                         if (iter.nextEat()) |arg| {
                             args[i] = arg.asArrayBuffer(ctx.ptr()) orelse {
                                 exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                                iter.deinit();
                                 return null;
                             };
                         } else {
                             exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         }
                     },
@@ -2809,7 +2801,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = arg.asArrayBuffer(ctx.ptr()) orelse {
                                     exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2822,13 +2813,11 @@ pub fn wrapWithHasContainer(
                     ZigString => {
                         var string_value = eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing argument", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
 
                         if (string_value.isUndefinedOrNull()) {
                             JSC.throwInvalidArguments("Expected string", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }
 
@@ -2857,11 +2846,9 @@ pub fn wrapWithHasContainer(
                     *Request => {
                         args[i] = (eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing Request object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }).as(Request) orelse {
                             JSC.throwInvalidArguments("Expected Request object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
                     },
@@ -2869,17 +2856,16 @@ pub fn wrapWithHasContainer(
                         args[i] = thisObject;
                         if (!JSValue.fromRef(thisObject).isCell() or !JSValue.fromRef(thisObject).isObject()) {
                             JSC.throwInvalidArguments("Expected object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }
                     },
                     js.ExceptionRef => {
                         args[i] = exception;
+                        passed_exception_ref = true;
                     },
                     JSValue => {
                         const val = eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing argument", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
                         args[i] = val;
@@ -2892,9 +2878,15 @@ pub fn wrapWithHasContainer(
             }
 
             var result: JSValue = @call(.auto, @field(Container, name), args);
-            if (exception.* != null) {
-                iter.deinit();
-                return null;
+            if (comptime passed_exception_ref) {
+                if (exception.* != null) {
+                    return null;
+                }
+            } else {
+                if (result.isError()) {
+                    exception.* = result.asObjectRef();
+                    return null;
+                }
             }
 
             if (comptime maybe_async) {
@@ -2904,8 +2896,6 @@ pub fn wrapWithHasContainer(
                     result = promise.result(ctx.vm());
                 }
             }
-
-            iter.deinit();
 
             if (result == .zero) {
                 return null;
@@ -3276,7 +3266,7 @@ pub const PollRef = struct {
 
         this.status = .inactive;
         loop.num_polls -= 1;
-        loop.active -= 1;
+        loop.active -|= 1;
     }
 
     /// Only intended to be used from EventLoop.Pollable
@@ -3615,7 +3605,7 @@ pub const FilePoll = struct {
     pub fn deactivate(this: *FilePoll, loop: *uws.Loop) void {
         std.debug.assert(this.flags.contains(.has_incremented_poll_count));
         loop.num_polls -= @as(i32, @boolToInt(this.flags.contains(.has_incremented_poll_count)));
-        loop.active -= @as(u32, @boolToInt(!this.flags.contains(.disable) and this.flags.contains(.has_incremented_poll_count)));
+        loop.active -|= @as(u32, @boolToInt(!this.flags.contains(.disable) and this.flags.contains(.has_incremented_poll_count)));
 
         this.flags.remove(.has_incremented_poll_count);
     }
@@ -4088,7 +4078,7 @@ pub const BinaryType = enum {
         return this.toJSType().toC();
     }
 
-    const Map = bun.ComptimeStringMap(
+    pub const Map = bun.ComptimeStringMap(
         BinaryType,
         .{
             .{ "ArrayBuffer", .ArrayBuffer },

@@ -31,12 +31,6 @@ Bun.build({
 });
 ```
 
-It can also be "registered" with the Bun runtime using the `Bun.plugin()` function. Once registered, the currently executing `bun` process will incorporate the plugin into its module resolution algorithm.
-
-```ts
-Bun.plugin(myPlugin);
-```
-
 To consume this plugin, add this file to the `preload` option in your [`bunfig.toml`](/docs/runtime/configuration). Bun automatically loads the files/modules specified in `preload` before running a file.
 
 ```toml
@@ -63,7 +57,7 @@ console.log(config);
 
 {% /details %}
 
-## Third party plugins
+## Third-party plugins
 
 By convention, third-party plugins intended for consumption should export a factory function that accepts some configuration and returns a plugin object.
 
@@ -80,7 +74,7 @@ plugin(
 // application code
 ```
 
-Bun's plugin API is based on [esbuild](https://esbuild.github.io/plugins). Only a subset of the esbuild API is implemented, but some esbuild plugins "just work" in Bun, like the official [MDX loader](https://mdxjs.com/packages/esbuild/):
+Bun's plugin API is based on [esbuild](https://esbuild.github.io/plugins). Only [a subset](/docs/bundler/migration#plugin-api) of the esbuild API is implemented, but some esbuild plugins "just work" in Bun, like the official [MDX loader](https://mdxjs.com/packages/esbuild/):
 
 ```jsx
 import { plugin } from "bun";
@@ -164,7 +158,7 @@ releaseYear: 2023
 
 Note that the returned object has a `loader` property. This tells Bun which of its internal loaders should be used to handle the result. Even though we're implementing a loader for `.yaml`, the result must still be understandable by one of Bun's built-in loaders. It's loaders all the way down.
 
-In this case we're using `"object"`—a special loader (intended for use by plugins) that converts a plain JavaScript object to an equivalent ES module. Any of Bun's built-in loaders are supported; these same loaders are used by Bun internally for handling files of various extensions.
+In this case we're using `"object"`—a built-in loader (intended for use by plugins) that converts a plain JavaScript object to an equivalent ES module. Any of Bun's built-in loaders are supported; these same loaders are used by Bun internally for handling files of various kinds. The table below is a quick reference; refer to [Bundler > Loaders](/docs/bundler/loaders) for complete documentation.
 
 {% table %}
 
@@ -175,13 +169,13 @@ In this case we're using `"object"`—a special loader (intended for use by plug
 ---
 
 - `js`
-- `.js` `.mjs` `.cjs`
+- `.mjs` `.cjs`
 - Transpile to JavaScript files
 
 ---
 
 - `jsx`
-- `.jsx`
+- `.js` `.jsx`
 - Transform JSX then transpile
 
 ---
@@ -210,8 +204,20 @@ In this case we're using `"object"`—a special loader (intended for use by plug
 
 ---
 
+- `napi`
+- `.node`
+- Import a native Node.js addon
+
+---
+
+- `wasm`
+- `.wasm`
+- Import a native Node.js addon
+
+---
+
 - `object`
-- —
+- _none_
 - A special loader intended for plugins that converts a plain JavaScript object to an equivalent ES module. Each key in the object corresponds to a named export.
 
 {% /callout %}
@@ -260,6 +266,31 @@ import MySvelteComponent from "./component.svelte";
 console.log(mySvelteComponent.render());
 ```
 
+## Reading `Bun.build`'s config
+
+Plugins can read and write to the [build config](/docs/cli/build#api) with `build.config`.
+
+```ts
+Bun.build({
+  entrypoints: ["./app.ts"],
+  outdir: "./dist",
+  sourcemap: "external",
+  plugins: [
+    {
+      name: "demo",
+      setup(build) {
+        console.log(build.config.sourcemap); // "external"
+
+        build.config.minify = true; // enable minification
+
+        // `plugins` is readonly
+        console.log(`Number of plugins: ${build.config.plugins.length}`);
+      },
+    },
+  ],
+});
+```
+
 ## Reference
 
 ```ts
@@ -283,6 +314,7 @@ type PluginBuilder = {
       exports?: Record<string, any>;
     },
   ) => void;
+  config: BuildConfig;
 };
 
 type Loader = "js" | "jsx" | "ts" | "tsx" | "json" | "toml" | "object";

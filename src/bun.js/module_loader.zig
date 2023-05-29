@@ -446,7 +446,7 @@ pub const ModuleLoader = struct {
                                 // we are only truly done if all the dependencies are done.
                                 const current_tasks = pm.total_tasks;
                                 // so if enqueuing all the dependencies produces no new tasks, we are done.
-                                pm.enqueueDependencyList(package.dependencies, false);
+                                pm.enqueueDependencyList(package.dependencies);
                                 if (current_tasks == pm.total_tasks) {
                                     tags[tag_i] = .done;
                                     done_count += 1;
@@ -2077,6 +2077,16 @@ pub const ModuleLoader = struct {
                 .source_url = ZigString.init(specifier),
                 .hash = 0,
             };
+        } else if (jsc_vm.standalone_module_graph) |graph| {
+            if (graph.files.get(specifier)) |file| {
+                return ResolvedSource{
+                    .allocator = null,
+                    .source_code = ZigString.init(file.contents),
+                    .specifier = ZigString.init(specifier),
+                    .source_url = ZigString.init(specifier),
+                    .hash = 0,
+                };
+            }
         }
 
         return null;

@@ -20,6 +20,7 @@ CPU_TARGET ?= native
 MARCH_NATIVE = -mtune=$(CPU_TARGET)
 NATIVE_OR_OLD_MARCH =
 
+MMD_IF_LOCAL = 
 DEFAULT_MIN_MACOS_VERSION=
 ARCH_NAME :=
 DOCKER_BUILDARCH =
@@ -41,7 +42,13 @@ endif
 MIN_MACOS_VERSION ?= $(DEFAULT_MIN_MACOS_VERSION)
 BUN_BASE_VERSION = 0.6
 
+CI ?= false
+
 AR=
+
+ifeq ($(CI), false)
+	MMD_IF_LOCAL = -MMD
+endif
 
 BUN_OR_NODE = $(shell which bun 2>/dev/null || which node 2>/dev/null)
 
@@ -77,6 +84,7 @@ ZIG ?= $(shell which zig 2>/dev/null || echo -e "error: Missing zig. Please make
 # so if that's resolved, it won't build for C++
 REAL_CC = $(shell which clang-15 2>/dev/null || which clang 2>/dev/null)
 REAL_CXX = $(shell which clang++-15 2>/dev/null || which clang++ 2>/dev/null)
+CLANG_FORMAT = $(shell which clang-format-15 2>/dev/null || which clang-format 2>/dev/null)
 
 CC = $(REAL_CC)
 CXX = $(REAL_CXX)
@@ -173,7 +181,7 @@ AR = $(shell which llvm-ar-15 2>/dev/null || which llvm-ar 2>/dev/null || which 
 endif
 
 OPTIMIZATION_LEVEL=-O3 $(MARCH_NATIVE)
-DEBUG_OPTIMIZATION_LEVEL= -O1 $(MARCH_NATIVE)
+DEBUG_OPTIMIZATION_LEVEL= -O1 $(MARCH_NATIVE) -gdwarf-4
 CFLAGS_WITHOUT_MARCH = $(MACOS_MIN_FLAG) $(OPTIMIZATION_LEVEL) -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden
 BUN_CFLAGS = $(MACOS_MIN_FLAG) $(MARCH_NATIVE)  $(OPTIMIZATION_LEVEL) -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden
 BUN_TMP_DIR := /tmp/make-bun
@@ -344,7 +352,7 @@ LINUX_INCLUDE_DIRS := $(ALL_JSC_INCLUDE_DIRS) \
 UWS_INCLUDE_DIR := -I$(BUN_DEPS_DIR)/uws/uSockets/src -I$(BUN_DEPS_DIR)/uws/src -I$(BUN_DEPS_DIR)
 
 
-INCLUDE_DIRS := $(UWS_INCLUDE_DIR) -I$(BUN_DEPS_DIR)/mimalloc/include -Isrc/napi -I$(BUN_DEPS_DIR)/boringssl/include -I$(BUN_DEPS_DIR)/c-ares/include
+INCLUDE_DIRS := $(UWS_INCLUDE_DIR) -I$(BUN_DEPS_DIR)/mimalloc/include -I$(BUN_DEPS_DIR)/zstd/include -Isrc/napi -I$(BUN_DEPS_DIR)/boringssl/include -I$(BUN_DEPS_DIR)/c-ares/include
 
 
 ifeq ($(OS_NAME),linux)
@@ -452,6 +460,7 @@ ARCHIVE_FILES_WITHOUT_LIBCRYPTO = $(MINIMUM_ARCHIVE_FILES) \
 		-ltcc \
 		-lusockets \
 		-lcares \
+		-lzstd \
 		$(BUN_DEPS_OUT_DIR)/libuwsockets.o
 
 ARCHIVE_FILES = $(ARCHIVE_FILES_WITHOUT_LIBCRYPTO)
@@ -528,9 +537,6 @@ get-%  : ; @echo $($*)
 print-version:
 	@echo $(PACKAGE_JSON_VERSION)
 
-
-
-
 # Prevent dependency on libtcc1 so it doesn't do filesystem lookups
 TINYCC_CFLAGS= -DTCC_LIBTCC1=\"\0\"
 
@@ -548,24 +554,8 @@ tinycc:
 PYTHON=$(shell which python 2>/dev/null || which python3 2>/dev/null || which python2 2>/dev/null)
 
 .PHONY: builtins
-builtins: ## to generate builtins
-	@if [ -z "$(WEBKIT_DIR)" ] || [ ! -d "$(WEBKIT_DIR)/Source" ]; then echo "WebKit is not cloned. Please run make init-submodules"; exit 1; fi
-	rm -f src/bun.js/bindings/*Builtin*.cpp src/bun.js/bindings/*Builtin*.h src/bun.js/bindings/*Builtin*.cpp
-	rm -rf src/bun.js/builtins/cpp
-	mkdir -p src/bun.js/builtins/cpp
-	$(PYTHON) $(realpath $(WEBKIT_DIR)/Source/JavaScriptCore/Scripts/generate-js-builtins.py) -i $(realpath src)/bun.js/builtins/js  -o $(realpath src)/bun.js/builtins/cpp --framework WebCore --force
-	$(PYTHON) $(realpath $(WEBKIT_DIR)/Source/JavaScriptCore/Scripts/generate-js-builtins.py) -i $(realpath src)/bun.js/builtins/js  -o $(realpath src)/bun.js/builtins/cpp --framework WebCore --wrappers-only
-	rm -rf /tmp/1.h src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h.1
-	echo -e '// clang-format off\nnamespace Zig { class GlobalObject; }\n#include "root.h"\n' >> /tmp/1.h
-	cat /tmp/1.h  src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h > src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h.1
-	mv src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h.1 src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h
-	rm -rf /tmp/1.h src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h.1
-	echo -e '// clang-format off\nnamespace Zig { class GlobalObject; }\n#include "root.h"\n' >> /tmp/1.h
-	cat /tmp/1.h  src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.cpp > src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.cpp.1
-	mv src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.cpp.1 src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.cpp
-	$(SED) -i -e 's/class JSDOMGlobalObject/using JSDOMGlobalObject = Zig::GlobalObject/' src/bun.js/builtins/cpp/WebCoreJSBuiltinInternals.h
-	# this is the one we actually build
-	mv src/bun.js/builtins/cpp/*JSBuiltin*.cpp src/bun.js/builtins
+builtins:
+	bun src/bun.js/builtins/codegen/index.ts --minify
 
 .PHONY: generate-builtins
 generate-builtins: builtins
@@ -636,6 +626,9 @@ compile-ffi-test:
 
 sqlite:
 
+.PHONY: zstd
+zstd:
+	cd $(BUN_DEPS_DIR)/zstd && rm -rf build-cmake-debug && cmake $(CMAKE_FLAGS) -DZSTD_BUILD_STATIC=ON -B build-cmake-debug -S build/cmake -G Ninja && ninja -C build-cmake-debug && cp build-cmake-debug/lib/libzstd.a $(BUN_DEPS_OUT_DIR)/libzstd.a
 
 .PHONY: libarchive
 libarchive:
@@ -680,6 +673,7 @@ require:
 	@which aclocal > /dev/null || (echo -e  "ERROR: automake is required. Install with:\n\n    $(POSIX_PKG_MANAGER) install automake"; exit 1)
 	@which $(LIBTOOL) > /dev/null || (echo -e "ERROR: libtool is required. Install with:\n\n    $(POSIX_PKG_MANAGER) install libtool"; exit 1)
 	@which ninja > /dev/null || (echo -e "ERROR: Ninja is required. Install with:\n\n    $(POSIX_PKG_MANAGER) install $(PKGNAME_NINJA)"; exit 1)
+	@which pkg-config > /dev/null || (echo -e "ERROR: pkg-config is required. Install with:\n\n    $(POSIX_PKG_MANAGER) install pkg-config"; exit 1)
 	@echo "You have the dependencies installed! Woo"
 
 init-submodules:
@@ -688,6 +682,10 @@ init-submodules:
 .PHONY: build-obj
 build-obj:
 	$(ZIG) build obj -Doptimize=ReleaseFast -Dcpu="$(CPU_TARGET)"
+
+.PHONY: build-obj-small
+build-obj-small:
+	$(ZIG) build obj -Doptimize=ReleaseSmall -Dcpu="$(CPU_TARGET)"
 
 .PHONY: dev-build-obj-wasm
 dev-build-obj-wasm:
@@ -767,10 +765,10 @@ sign-macos-aarch64:
 	gon sign.macos-aarch64.json
 
 cls:
-	@echo "\n\n---\n\n"
+	@echo -e "\n\n---\n\n"
 
 jsc-check:
-	@ls $(JSC_BASE_DIR)  >/dev/null 2>&1 || (echo "Failed to access WebKit build. Please compile the WebKit submodule using the Dockerfile at $(shell pwd)/src/javascript/WebKit/Dockerfile and then copy from /output in the Docker container to $(JSC_BASE_DIR). You can override the directory via JSC_BASE_DIR. \n\n 	DOCKER_BUILDKIT=1 docker build -t bun-webkit $(shell pwd)/src/bun.js/WebKit -f $(shell pwd)/src/bun.js/WebKit/Dockerfile --progress=plain\n\n 	docker container create bun-webkit\n\n 	# Get the container ID\n	docker container ls\n\n 	docker cp DOCKER_CONTAINER_ID_YOU_JUST_FOUND:/output $(JSC_BASE_DIR)" && exit 1)
+	@ls $(JSC_BASE_DIR)  >/dev/null 2>&1 || (echo -e "Failed to access WebKit build. Please compile the WebKit submodule using the Dockerfile at $(shell pwd)/src/javascript/WebKit/Dockerfile and then copy from /output in the Docker container to $(JSC_BASE_DIR). You can override the directory via JSC_BASE_DIR. \n\n 	DOCKER_BUILDKIT=1 docker build -t bun-webkit $(shell pwd)/src/bun.js/WebKit -f $(shell pwd)/src/bun.js/WebKit/Dockerfile --progress=plain\n\n 	docker container create bun-webkit\n\n 	# Get the container ID\n	docker container ls\n\n 	docker cp DOCKER_CONTAINER_ID_YOU_JUST_FOUND:/output $(JSC_BASE_DIR)" && exit 1)
 	@ls $(JSC_INCLUDE_DIR)  >/dev/null 2>&1 || (echo "Failed to access WebKit include directory at $(JSC_INCLUDE_DIR)." && exit 1)
 	@ls $(JSC_LIB)  >/dev/null 2>&1 || (echo "Failed to access WebKit lib directory at $(JSC_LIB)." && exit 1)
 
@@ -793,7 +791,7 @@ release-safe: prerelease release-safe-only
 
 .PHONY: fmt-cpp
 fmt-cpp:
-	cd src/bun.js/bindings && clang-format *.cpp *.h -i
+	cd src/bun.js/bindings && $(CLANG_FORMAT) *.cpp *.h -i
 
 .PHONY: fmt-zig
 fmt-zig:
@@ -908,7 +906,6 @@ bun-codesign-release-local:
 bun-codesign-release-local-debug:
 
 
-
 .PHONY: jsc
 jsc: jsc-build jsc-copy-headers jsc-bindings
 .PHONY: jsc-build
@@ -920,7 +917,6 @@ jsc-bindings: headers bindings
 clone-submodules:
 	git -c submodule."src/bun.js/WebKit".update=none submodule update --init --recursive --depth=1 --progress
 
-CLANG_FORMAT := $(shell command -v clang-format 2> /dev/null)
 
 .PHONY: headers
 headers:
@@ -1115,7 +1111,6 @@ jsc-copy-headers:
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/ObjectPropertyConditionSet.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/ObjectPropertyConditionSet.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/PolyProtoAccessChain.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/PolyProtoAccessChain.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/InlineCacheCompiler.h
-	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/PutKind.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/PutKind.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/StructureStubClearingWatchpoint.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/StructureStubClearingWatchpoint.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/AdaptiveInferredPropertyValueWatchpointBase.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/AdaptiveInferredPropertyValueWatchpointBase.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/StubInfoSummary.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/StubInfoSummary.h
@@ -1149,6 +1144,9 @@ jsc-copy-headers:
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/runtime/AsyncFunctionPrototype.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/AsyncFunctionPrototype.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/runtime/SymbolObject.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/SymbolObject.h
 	cp $(WEBKIT_DIR)/Source/JavaScriptCore/runtime/JSGenerator.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/JSGenerator.h
+	cp $(WEBKIT_DIR)/Source/JavaScriptCore/bytecode/UnlinkedFunctionCodeBlock.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/UnlinkedFunctionCodeBlock.h
+	cp $(WEBKIT_DIR)/Source/JavaScriptCore/runtime/AggregateError.h $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/AggregateError.h
+	cp $(WEBKIT_DIR)/Source/JavaScriptCore/API/JSWeakValue.h  $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/JSWeakValue.h
 	find $(WEBKIT_RELEASE_DIR)/JavaScriptCore/Headers/JavaScriptCore/ -name "*.h" -exec cp {} $(WEBKIT_RELEASE_DIR)/JavaScriptCore/PrivateHeaders/JavaScriptCore/ \;
 
 # This is a workaround for a JSC bug that impacts aarch64
@@ -1298,7 +1296,7 @@ jsc-bindings-mac: bindings
 MIMALLOC_VALGRIND_ENABLED_FLAG =
 
 ifeq ($(OS_NAME),linux)
-	MIMALLOC_VALGRIND_ENABLED_FLAG = -DMI_VALGRIND=ON
+	MIMALLOC_VALGRIND_ENABLED_FLAG = -DMI_TRACK_VALGRIND=ON
 endif
 
 
@@ -1381,6 +1379,19 @@ bun-relink-copy:
 	mkdir -p $(PACKAGE_DIR)
 	cp $(BUN_DEPLOY_DIR).o $(BUN_RELEASE_BIN).o
 
+.PHONY: bun-link-lld-profile profile
+bun-link-lld-profile:
+	$(CXX) $(BUN_LLD_FLAGS) $(SYMBOLS) -g -gdwarf-4 -fno-omit-frame-pointer \
+		$(BUN_RELEASE_BIN).o \
+		-o $(BUN_RELEASE_BIN) \
+		-W \
+		$(OPTIMIZATION_LEVEL) $(RELEASE_FLAGS)
+	rm -rf $(BUN_RELEASE_BIN).dSYM
+	cp $(BUN_RELEASE_BIN) $(BUN_RELEASE_BIN)-profile
+	@rm -f $(BUN_RELEASE_BIN).o.o # workaround for https://github.com/ziglang/zig/issues/14080
+
+build-profile: build-obj bun-link-lld-profile bun-codesign-release-local
+
 bun-link-lld-release:
 	$(CXX) $(BUN_LLD_FLAGS) $(SYMBOLS) \
 		$(BUN_RELEASE_BIN).o \
@@ -1431,11 +1442,11 @@ wasm-return1:
 generate-classes:
 	bun src/bun.js/scripts/generate-classes.ts
 	$(ZIG) fmt src/bun.js/bindings/generated_classes.zig
-	clang-format -i src/bun.js/bindings/ZigGeneratedClasses.h src/bun.js/bindings/ZigGeneratedClasses.cpp
+	$(CLANG_FORMAT) -i src/bun.js/bindings/ZigGeneratedClasses.h src/bun.js/bindings/ZigGeneratedClasses.cpp
 
 generate-sink:
 	bun src/bun.js/scripts/generate-jssink.js
-	clang-format -i  src/bun.js/bindings/JSSink.cpp  src/bun.js/bindings/JSSink.h
+	$(CLANG_FORMAT) -i  src/bun.js/bindings/JSSink.cpp  src/bun.js/bindings/JSSink.h
 	$(WEBKIT_DIR)/Source/JavaScriptCore/create_hash_table src/bun.js/bindings/JSSink.cpp > src/bun.js/bindings/JSSinkLookupTable.h
 	$(SED) -i -e 's/#include "Lookup.h"//' src/bun.js/bindings/JSSinkLookupTable.h
 	$(SED) -i -e 's/namespace JSC {//' src/bun.js/bindings/JSSinkLookupTable.h
@@ -1459,7 +1470,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) $(UWS_INCLUDE) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1470,7 +1481,7 @@ $(OBJ_DIR)/%.o: src/bun.js/modules/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) $(UWS_INCLUDE) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1481,7 +1492,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/webcore/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1492,7 +1503,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/sqlite/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1503,7 +1514,7 @@ $(OBJ_DIR)/%.o: src/io/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1514,7 +1525,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/node_os/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1525,7 +1536,7 @@ $(OBJ_DIR)/%.o: src/bun.js/builtins/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1537,7 +1548,7 @@ $(OBJ_DIR)/%.o: src/bun.js/bindings/webcrypto/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1551,7 +1562,7 @@ $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) $(UWS_INCLUDE) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1566,7 +1577,7 @@ $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/webcore/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1579,7 +1590,7 @@ $(DEBUG_OBJ_DIR)/%.o: src/io/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1595,7 +1606,7 @@ $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/sqlite/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1610,7 +1621,7 @@ $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/node_os/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1625,7 +1636,7 @@ $(DEBUG_OBJ_DIR)/%.o: src/bun.js/builtins/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1638,7 +1649,7 @@ $(DEBUG_OBJ_DIR)/%.o: src/bun.js/modules/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-fno-rtti \
 		-ferror-limit=1000 \
@@ -1652,7 +1663,7 @@ $(DEBUG_OBJ_DIR)/%.o: src/bun.js/bindings/webcrypto/%.cpp
 	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
 		$(MACOS_MIN_FLAG) \
 		$(DEBUG_OPTIMIZATION_LEVEL) \
-		-MMD \
+		${MMD_IF_LOCAL} \
 		-fno-exceptions \
 		-I$(SRC_DIR) \
 		-fno-rtti \
@@ -1827,8 +1838,24 @@ copy-to-bun-release-dir-bin:
 PACKAGE_MAP = --pkg-begin async_io $(BUN_DIR)/src/io/io_darwin.zig --pkg-begin bun $(BUN_DIR)/src/bun_redirect.zig --pkg-end --pkg-end --pkg-begin javascript_core $(BUN_DIR)/src/jsc.zig --pkg-begin bun $(BUN_DIR)/src/bun_redirect.zig --pkg-end --pkg-end --pkg-begin bun $(BUN_DIR)/src/bun_redirect.zig --pkg-end
 
 
+.PHONY: cold-jsc-start
+cold-jsc-start:
+	$(CXX_WITH_CCACHE) $(CLANG_FLAGS) \
+		$(MACOS_MIN_FLAG) \
+		$(OPTIMIZATION_LEVEL) \
+		${MMD_IF_LOCAL} \
+		-fno-exceptions \
+		-fno-rtti \
+		-ferror-limit=1000 \
+		$(LIBICONV_PATH) \
+		$(DEFAULT_LINKER_FLAGS) \
+		$(PLATFORM_LINKER_FLAGS) \
+		$(ICU_FLAGS) \
+		$(JSC_FILES) \
+		misctools/cold-jsc-start.cpp -o cold-jsc-start
+
 .PHONY: vendor-without-npm
-vendor-without-npm: node-fallbacks runtime_js fallback_decoder bun_error mimalloc picohttp zlib boringssl libarchive lolhtml sqlite usockets uws tinycc c-ares
+vendor-without-npm: node-fallbacks runtime_js fallback_decoder bun_error mimalloc picohttp zlib boringssl libarchive lolhtml sqlite usockets uws tinycc c-ares zstd
 
 .PHONY: vendor-without-check
 vendor-without-check: npm-install vendor-without-npm

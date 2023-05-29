@@ -1,7 +1,9 @@
 const { EventEmitter } = import.meta.require("node:events");
-const { Readable, Writable } = import.meta.require("node:stream");
+const { isIPv6 } = import.meta.require("node:net");
+const { Readable, Writable, Duplex } = import.meta.require("node:stream");
 const { URL } = import.meta.require("node:url");
 const { newArrayWithSize, String, Object, Array } = import.meta.primordials;
+const { isTypedArray } = import.meta.require("util/types");
 
 const globalReportError = globalThis.reportError;
 const setTimeout = globalThis.setTimeout;
@@ -39,17 +41,106 @@ const NODE_HTTP_WARNING =
 var _globalAgent;
 var _defaultHTTPSAgent;
 var kInternalRequest = Symbol("kInternalRequest");
+var kInternalSocketData = Symbol.for("::bunternal::");
 
-var FakeSocket = class Socket {
-  on() {
+const kEmptyBuffer = Buffer.alloc(0);
+
+function isValidTLSArray(obj) {
+  if (typeof obj === "string" || isTypedArray(obj) || obj instanceof ArrayBuffer || obj instanceof Blob) return true;
+  if (Array.isArray(obj)) {
+    for (var i = 0; i < obj.length; i++) {
+      if (typeof obj !== "string" && !isTypedArray(obj) && !(obj instanceof ArrayBuffer) && !(obj instanceof Blob))
+        return false;
+    }
+    return true;
+  }
+}
+
+function getHeader(headers, name) {
+  if (!headers) return;
+  const result = headers.get(name);
+  return result == null ? undefined : result;
+}
+
+var FakeSocket = class Socket extends Duplex {
+  bytesRead = 0;
+  bytesWritten = 0;
+  connecting = false;
+  remoteAddress = null;
+  localAddress = "127.0.0.1";
+  remotePort;
+  timeout = 0;
+
+  isServer = false;
+
+  address() {
+    return {
+      address: this.localAddress,
+      family: this.localFamily,
+      port: this.localPort,
+    };
+  }
+
+  get bufferSize() {
+    return this.writableLength;
+  }
+
+  connect(port, host, connectListener) {
     return this;
   }
-  off() {}
-  addListener() {
+
+  _destroy(err, callback) {}
+
+  _final(callback) {}
+
+  get localAddress() {
+    return "127.0.0.1";
+  }
+
+  get localFamily() {
+    return "IPv4";
+  }
+
+  get localPort() {
+    return 80;
+  }
+
+  get pending() {
+    return this.connecting;
+  }
+
+  _read(size) {}
+
+  get readyState() {
+    if (this.connecting) return "opening";
+    if (this.readable) {
+      return this.writable ? "open" : "readOnly";
+    } else {
+      return this.writable ? "writeOnly" : "closed";
+    }
+  }
+
+  ref() {}
+
+  get remoteFamily() {
+    return "IPv4";
+  }
+
+  resetAndDestroy() {}
+
+  setKeepAlive(enable = false, initialDelay = 0) {}
+
+  setNoDelay(noDelay = true) {
     return this;
   }
-  removeListener() {}
-  removeAllListeners() {}
+
+  setTimeout(timeout, callback) {
+    return this;
+  }
+
+  unref() {}
+
+  _write(chunk, encoding, callback) {}
 };
 
 export function createServer(options, callback) {
@@ -199,10 +290,30 @@ export class Agent extends EventEmitter {
     debug(`${NODE_HTTP_WARNING}\n`, "WARN: Agent.destroy is a no-op");
   }
 }
+function emitListeningNextTick(self, onListen, err, hostname, port) {
+  if (typeof onListen === "function") {
+    try {
+      onListen(err, hostname, port);
+    } catch (err) {
+      self.emit("error", err);
+    }
+  }
+
+  self.listening = !err;
+
+  if (err) {
+    self.emit("error", err);
+  } else {
+    self.emit("listening", hostname, port);
+  }
+}
 
 export class Server extends EventEmitter {
   #server;
   #options;
+  #tls;
+  #is_tls = false;
+  listening = false;
 
   constructor(options, callback) {
     super();
@@ -212,6 +323,62 @@ export class Server extends EventEmitter {
       options = {};
     } else if (options == null || typeof options === "object") {
       options = { ...options };
+      this.#tls = null;
+      let key = options.key;
+      if (key) {
+        if (!isValidTLSArray(key)) {
+          throw new TypeError(
+            "key argument must be an string, Buffer, TypedArray, BunFile or an array containing string, Buffer, TypedArray or BunFile",
+          );
+        }
+        this.#is_tls = true;
+      }
+      let cert = options.cert;
+      if (cert) {
+        if (!isValidTLSArray(cert)) {
+          throw new TypeError(
+            "cert argument must be an string, Buffer, TypedArray, BunFile or an array containing string, Buffer, TypedArray or BunFile",
+          );
+        }
+        this.#is_tls = true;
+      }
+
+      let ca = options.ca;
+      if (ca) {
+        if (!isValidTLSArray(ca)) {
+          throw new TypeError(
+            "ca argument must be an string, Buffer, TypedArray, BunFile or an array containing string, Buffer, TypedArray or BunFile",
+          );
+        }
+        this.#is_tls = true;
+      }
+      let passphrase = options.passphrase;
+      if (passphrase && typeof passphrase !== "string") {
+        throw new TypeError("passphrase argument must be an string");
+      }
+
+      let serverName = options.servername;
+      if (serverName && typeof serverName !== "string") {
+        throw new TypeError("servername argument must be an string");
+      }
+
+      let secureOptions = options.secureOptions || 0;
+      if (secureOptions && typeof secureOptions !== "number") {
+        throw new TypeError("secureOptions argument must be an number");
+      }
+
+      if (this.#is_tls) {
+        this.#tls = {
+          serverName,
+          key: key,
+          cert: cert,
+          ca: ca,
+          passphrase: passphrase,
+          secureOptions: secureOptions,
+        };
+      } else {
+        this.#tls = null;
+      }
     } else {
       throw new Error("bun-http-polyfill: invalid arguments");
     }
@@ -221,19 +388,45 @@ export class Server extends EventEmitter {
     if (callback) this.on("request", callback);
   }
 
-  close() {
-    if (this.#server) {
-      this.emit("close");
-      this.#server.stop();
-      this.#server = undefined;
+  closeAllConnections() {
+    const server = this.#server;
+    if (!server) {
+      return;
     }
+    this.#server = undefined;
+    server.stop(true);
+    this.emit("close");
+  }
+
+  closeIdleConnections() {
+    // not actually implemented
+  }
+
+  close(optionalCallback) {
+    const server = this.#server;
+    if (!server) {
+      if (typeof optionalCallback === "function")
+        process.nextTick(optionalCallback, new Error("Server is not running"));
+      return;
+    }
+    this.#server = undefined;
+    if (typeof optionalCallback === "function") this.once("close", optionalCallback);
+    server.stop();
+    this.emit("close");
   }
 
   address() {
-    return this.#server?.hostname;
+    if (!this.#server) return null;
+
+    const address = this.#server.hostname;
+    return {
+      address,
+      family: isIPv6(address) ? "IPv6" : "IPv4",
+      port: this.#server.port,
+    };
   }
 
-  listen(port, host, onListen) {
+  listen(port, host, backlog, onListen) {
     const server = this;
     if (typeof host === "function") {
       onListen = host;
@@ -252,15 +445,39 @@ export class Server extends EventEmitter {
 
       if (typeof port?.callback === "function") onListen = port?.callback;
     }
+
+    if (typeof backlog === "function") {
+      onListen = backlog;
+    }
+
     const ResponseClass = this.#options.ServerResponse || ServerResponse;
     const RequestClass = this.#options.IncomingMessage || IncomingMessage;
 
     try {
+      const tls = this.#tls;
+      if (tls) {
+        this.serverName = tls.serverName || host || "localhost";
+      }
       this.#server = Bun.serve({
+        tls,
         port,
         hostname: host,
-
-        fetch(req) {
+        // Bindings to be used for WS Server
+        websocket: {
+          open(ws) {
+            ws.data.open(ws);
+          },
+          message(ws, message) {
+            ws.data.message(ws, message);
+          },
+          close(ws, code, reason) {
+            ws.data.close(ws, code, reason);
+          },
+          drain(ws) {
+            ws.data.drain(ws);
+          },
+        },
+        fetch(req, _server) {
           var pendingResponse;
           var pendingError;
           var rejectFunction, resolveFunction;
@@ -281,7 +498,15 @@ export class Server extends EventEmitter {
 
           http_req.once("error", err => reject(err));
           http_res.once("error", err => reject(err));
-          server.emit("request", http_req, http_res);
+
+          const upgrade = req.headers.get("upgrade");
+          if (upgrade) {
+            const socket = new FakeSocket();
+            socket[kInternalSocketData] = [_server, http_res, req];
+            server.emit("upgrade", http_req, socket, kEmptyBuffer);
+          } else {
+            server.emit("request", http_req, http_res);
+          }
 
           if (pendingError) {
             throw pendingError;
@@ -297,17 +522,14 @@ export class Server extends EventEmitter {
           });
         },
       });
-
-      if (onListen) setTimeout(() => onListen(null, this.#server.hostname, this.#server.port), 0);
+      setTimeout(emitListeningNextTick, 1, this, onListen, null, this.#server.hostname, this.#server.port);
     } catch (err) {
-      if (onListen) {
-        setTimeout(onListen, 0, err);
-      }
-      this.emit("error", err);
+      setTimeout(emitListeningNextTick, 1, this, onListen, err);
     }
 
     return this;
   }
+  setTimeout(msecs, callback) {}
 }
 
 function assignHeaders(object, req) {
@@ -357,7 +579,10 @@ export class IncomingMessage extends Readable {
     this.complete = !!this.#noBody;
 
     this.#bodyStream = null;
-    this.#fakeSocket = undefined;
+    const socket = new FakeSocket();
+    socket.remoteAddress = url.hostname;
+    socket.remotePort = url.port;
+    this.#fakeSocket = socket;
 
     this.url = url.pathname + url.search;
     this.#nodeReq = nodeReq;
@@ -472,7 +697,7 @@ export class IncomingMessage extends Readable {
   }
 
   get httpVersion() {
-    return 1.1;
+    return "1.1";
   }
 
   get rawTrailers() {
@@ -493,6 +718,10 @@ export class IncomingMessage extends Readable {
 
   get socket() {
     return (this.#fakeSocket ??= new FakeSocket());
+  }
+
+  set socket(val) {
+    this.#fakeSocket = val;
   }
 
   setTimeout(msecs, callback) {
@@ -615,6 +844,10 @@ export class OutgoingMessage extends Writable {
     return (this.#fakeSocket ??= new FakeSocket());
   }
 
+  set socket(val) {
+    this.#fakeSocket = val;
+  }
+
   get connection() {
     return this.socket;
   }
@@ -631,8 +864,7 @@ export class OutgoingMessage extends Writable {
   flushHeaders() {}
 
   getHeader(name) {
-    if (!this.#headers) return;
-    return this.#headers.get(name);
+    return getHeader(this.#headers, name);
   }
 
   getHeaders() {
@@ -865,13 +1097,13 @@ export class ServerResponse extends Writable {
   flushHeaders() {}
 
   getHeader(name) {
-    if (!this.#headers) return;
-    return this.#headers.get(name);
+    return getHeader(this.#headers, name);
   }
 
   getHeaders() {
-    if (!this.#headers) return kEmptyObject;
-    return this.#headers.toJSON();
+    var headers = this.#headers;
+    if (!headers) return kEmptyObject;
+    return headers.toJSON();
   }
 
   getHeaderNames() {
@@ -925,7 +1157,7 @@ export class ClientRequest extends OutgoingMessage {
   #fetchRequest;
   #signal = null;
   [kAbortController] = null;
-
+  #timeoutTimer = null;
   #options;
   #finished;
 
@@ -984,34 +1216,39 @@ export class ClientRequest extends OutgoingMessage {
     var method = this.#method,
       body = this.#body;
 
-    this.#fetchRequest = fetch(
-      `${this.#protocol}//${this.#host}${this.#useDefaultPort ? "" : ":" + this.#port}${this.#path}`,
-      {
-        method,
-        headers: this.getHeaders(),
-        body: body && method !== "GET" && method !== "HEAD" && method !== "OPTIONS" ? body : undefined,
-        redirect: "manual",
-        verbose: Boolean(__DEBUG__),
-        signal: this[kAbortController].signal,
-      },
-    )
-      .then(response => {
-        var res = (this.#res = new IncomingMessage(response, {
-          type: "response",
-          [kInternalRequest]: this,
-        }));
-        this.emit("response", res);
-      })
-      .catch(err => {
-        if (__DEBUG__) globalReportError(err);
-        this.emit("error", err);
-      })
-      .finally(() => {
-        this.#fetchRequest = null;
-        this[kClearTimeout]();
-      });
-
-    callback();
+    try {
+      this.#fetchRequest = fetch(
+        `${this.#protocol}//${this.#host}${this.#useDefaultPort ? "" : ":" + this.#port}${this.#path}`,
+        {
+          method,
+          headers: this.getHeaders(),
+          body: body && method !== "GET" && method !== "HEAD" && method !== "OPTIONS" ? body : undefined,
+          redirect: "manual",
+          verbose: Boolean(__DEBUG__),
+          signal: this[kAbortController].signal,
+        },
+      )
+        .then(response => {
+          var res = (this.#res = new IncomingMessage(response, {
+            type: "response",
+            [kInternalRequest]: this,
+          }));
+          this.emit("response", res);
+        })
+        .catch(err => {
+          if (__DEBUG__) globalReportError(err);
+          this.emit("error", err);
+        })
+        .finally(() => {
+          this.#fetchRequest = null;
+          this[kClearTimeout]();
+        });
+    } catch (err) {
+      if (__DEBUG__) globalReportError(err);
+      this.emit("error", err);
+    } finally {
+      callback();
+    }
   }
 
   get aborted() {
@@ -1053,7 +1290,16 @@ export class ClientRequest extends OutgoingMessage {
 
     var defaultAgent = options._defaultAgent || Agent.globalAgent;
 
-    const protocol = (this.#protocol = options.protocol ||= defaultAgent.protocol);
+    let protocol = options.protocol;
+    if (!protocol) {
+      if (options.port === 443) {
+        protocol = "https:";
+      } else {
+        protocol = defaultAgent.protocol || "http:";
+      }
+      this.#protocol = protocol;
+    }
+
     switch (this.#agent?.protocol) {
       case undefined: {
         break;
@@ -1183,7 +1429,7 @@ export class ClientRequest extends OutgoingMessage {
     this.#reusedSocket = false;
     this.#host = host;
     this.#protocol = protocol;
-
+    this.#timeoutTimer = null;
     const headersArray = ArrayIsArray(headers);
     if (!headersArray) {
       var headers = options.headers;
@@ -1253,6 +1499,31 @@ export class ClientRequest extends OutgoingMessage {
 
   setSocketKeepAlive(enable = true, initialDelay = 0) {
     __DEBUG__ && debug(`${NODE_HTTP_WARNING}\n`, "WARN: ClientRequest.setSocketKeepAlive is a no-op");
+  }
+
+  setNoDelay(noDelay = true) {
+    __DEBUG__ && debug(`${NODE_HTTP_WARNING}\n`, "WARN: ClientRequest.setNoDelay is a no-op");
+  }
+  [kClearTimeout]() {
+    if (this.#timeoutTimer) {
+      clearTimeout(this.#timeoutTimer);
+      this.#timeoutTimer = null;
+    }
+  }
+
+  setTimeout(msecs, callback) {
+    if (this.#timeoutTimer) return this;
+    if (callback) {
+      this.on("timeout", callback);
+    }
+
+    this.#timeoutTimer = setTimeout(async () => {
+      this.#timeoutTimer = null;
+      this[kAbortController]?.abort();
+      this.emit("timeout");
+    }, msecs);
+
+    return this;
   }
 }
 

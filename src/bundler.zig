@@ -366,6 +366,7 @@ pub const Bundler = struct {
     elapsed: u64 = 0,
     needs_runtime: bool = false,
     router: ?Router = null,
+    source_map: options.SourceMapOption = .none,
 
     linker: Linker,
     timer: SystemTimer = undefined,
@@ -504,19 +505,22 @@ pub const Bundler = struct {
         switch (this.options.env.behavior) {
             .prefix, .load_all => {
                 // Step 1. Load the project root.
-                var dir: *Fs.FileSystem.DirEntry = ((this.resolver.readDirInfo(this.fs.top_level_dir) catch return) orelse return).getEntries() orelse return;
+                var dir: *Fs.FileSystem.DirEntry = ((this.resolver.readDirInfo(this.fs.top_level_dir) catch return) orelse return).getEntries(this.resolver.generation) orelse return;
 
                 // Process always has highest priority.
                 const was_production = this.options.production;
                 this.env.loadProcess();
-                if (!was_production and this.env.isProduction()) {
+                const has_production_env = this.env.isProduction();
+                if (!was_production and has_production_env) {
                     this.options.setProduction(true);
                 }
 
-                if (this.options.production) {
-                    try this.env.load(&this.fs.fs, dir, false);
+                if (!has_production_env and this.options.isTest()) {
+                    try this.env.load(&this.fs.fs, dir, .@"test");
+                } else if (this.options.production) {
+                    try this.env.load(&this.fs.fs, dir, .production);
                 } else {
-                    try this.env.load(&this.fs.fs, dir, true);
+                    try this.env.load(&this.fs.fs, dir, .development);
                 }
             },
             .disable => {
@@ -578,13 +582,15 @@ pub const Bundler = struct {
             if (NODE_ENV.len > 0 and NODE_ENV[0].data.value == .e_string and NODE_ENV[0].data.value.e_string.eqlComptime("production")) {
                 this.options.production = true;
 
-                if (strings.eqlComptime(this.options.jsx.package_name, "react")) {
-                    if (this.options.jsx_optimization_inline == null) {
-                        this.options.jsx_optimization_inline = true;
-                    }
+                if (this.options.target.isBun()) {
+                    if (strings.eqlComptime(this.options.jsx.package_name, "react")) {
+                        if (this.options.jsx_optimization_inline == null) {
+                            this.options.jsx_optimization_inline = true;
+                        }
 
-                    if (this.options.jsx_optimization_hoist == null and (this.options.jsx_optimization_inline orelse false)) {
-                        this.options.jsx_optimization_hoist = true;
+                        if (this.options.jsx_optimization_hoist == null and (this.options.jsx_optimization_inline orelse false)) {
+                            this.options.jsx_optimization_hoist = true;
+                        }
                     }
                 }
             }
@@ -873,7 +879,10 @@ pub const Bundler = struct {
                 }
 
                 if (bundler.options.target.isBun()) {
-                    try bundler.linker.link(file_path, &result, origin, import_path_format, false, true);
+                    if (!bundler.options.transform_only) {
+                        try bundler.linker.link(file_path, &result, origin, import_path_format, false, true);
+                    }
+
                     return BuildResolveResultPair{
                         .written = switch (result.ast.exports_kind) {
                             .esm => try bundler.printWithSourceMapMaybe(
@@ -900,7 +909,9 @@ pub const Bundler = struct {
                     };
                 }
 
-                try bundler.linker.link(file_path, &result, origin, import_path_format, false, false);
+                if (!bundler.options.transform_only) {
+                    try bundler.linker.link(file_path, &result, origin, import_path_format, false, false);
+                }
 
                 return BuildResolveResultPair{
                     .written = switch (result.ast.exports_kind) {
@@ -954,23 +965,10 @@ pub const Bundler = struct {
         file_path.pretty = Linker.relative_paths_list.append(string, bundler.fs.relativeTo(file_path.text)) catch unreachable;
 
         var output_file = options.OutputFile{
-            .input = file_path,
+            .src_path = file_path,
             .loader = loader,
             .value = undefined,
         };
-
-        var file: std.fs.File = undefined;
-
-        if (Outstream == std.fs.Dir) {
-            const output_dir = outstream;
-
-            if (std.fs.path.dirname(file_path.pretty)) |dirname| {
-                try output_dir.makePath(dirname);
-            }
-            file = try output_dir.createFile(file_path.pretty, .{});
-        } else {
-            file = outstream;
-        }
 
         switch (loader) {
             .jsx, .tsx, .js, .ts, .json, .toml, .text => {
@@ -989,61 +987,68 @@ pub const Bundler = struct {
                 ) orelse {
                     return null;
                 };
-                if (!bundler.options.target.isBun())
-                    try bundler.linker.link(
-                        file_path,
-                        &result,
-                        bundler.options.origin,
-                        import_path_format,
-                        false,
-                        false,
-                    )
-                else
-                    try bundler.linker.link(
-                        file_path,
-                        &result,
-                        bundler.options.origin,
-                        import_path_format,
-                        false,
-                        true,
-                    );
+                if (!bundler.options.transform_only) {
+                    if (!bundler.options.target.isBun())
+                        try bundler.linker.link(
+                            file_path,
+                            &result,
+                            bundler.options.origin,
+                            import_path_format,
+                            false,
+                            false,
+                        )
+                    else
+                        try bundler.linker.link(
+                            file_path,
+                            &result,
+                            bundler.options.origin,
+                            import_path_format,
+                            false,
+                            true,
+                        );
+                }
+
+                var buffer_writer = try js_printer.BufferWriter.init(bundler.allocator);
+                var writer = js_printer.BufferPrinter.init(buffer_writer);
 
                 output_file.size = switch (bundler.options.target) {
                     .browser, .node => try bundler.print(
                         result,
-                        js_printer.FileWriter,
-                        js_printer.NewFileWriter(file),
+                        *js_printer.BufferPrinter,
+                        &writer,
                         .esm,
                     ),
                     .bun, .bun_macro => try bundler.print(
                         result,
-                        js_printer.FileWriter,
-                        js_printer.NewFileWriter(file),
+                        *js_printer.BufferPrinter,
+                        &writer,
                         .esm_ascii,
                     ),
                 };
-
-                var file_op = options.OutputFile.FileOperation.fromFile(file.handle, file_path.pretty);
-
-                file_op.fd = file.handle;
-
-                file_op.is_tmpdir = false;
-
-                if (Outstream == std.fs.Dir) {
-                    file_op.dir = outstream.fd;
-
-                    if (bundler.fs.fs.needToCloseFiles()) {
-                        file.close();
-                        file_op.fd = 0;
-                    }
-                }
-
-                output_file.value = .{ .move = file_op };
+                output_file.value = .{
+                    .buffer = .{
+                        .allocator = bundler.allocator,
+                        .bytes = writer.ctx.written,
+                    },
+                };
             },
             .dataurl, .base64 => {
                 Output.panic("TODO: dataurl, base64", .{}); // TODO
             },
             .css => {
+                var file: std.fs.File = undefined;
+
+                if (Outstream == std.fs.Dir) {
+                    const output_dir = outstream;
+
+                    if (std.fs.path.dirname(file_path.pretty)) |dirname| {
+                        try output_dir.makePath(dirname);
+                    }
+                    file = try output_dir.createFile(file_path.pretty, .{});
+                } else {
+                    file = outstream;
+                }
+
                 const CSSBuildContext = struct {
                     origin: URL,
                 };
@@ -1305,14 +1310,6 @@ pub const Bundler = struct {
         const path = this_parse.path;
         const loader = this_parse.loader;
 
-        if (FeatureFlags.tracing) {
-            bundler.timer.reset();
-        }
-        defer {
-            if (FeatureFlags.tracing) {
-                bundler.elapsed += bundler.timer.read();
-            }
-        }
         var input_fd: ?StoredFileDescriptorType = null;
 
         const source: logger.Source = brk: {
@@ -1386,7 +1383,7 @@ pub const Bundler = struct {
                 opts.legacy_transform_require_to_import = bundler.options.allow_runtime and !bundler.options.target.isBun();
                 opts.features.allow_runtime = bundler.options.allow_runtime;
                 opts.features.trim_unused_imports = bundler.options.trim_unused_imports orelse loader.isTypeScript();
-                opts.features.should_fold_typescript_constant_expressions = loader.isTypeScript() or target.isBun() or bundler.options.inlining;
+                opts.features.should_fold_typescript_constant_expressions = loader.isTypeScript() or target.isBun() or bundler.options.minify_syntax;
                 opts.features.dynamic_require = target.isBun();
                 opts.transform_only = bundler.options.transform_only;
 
@@ -1778,7 +1775,14 @@ pub const Bundler = struct {
 
         if (bundler.linker.any_needs_runtime) {
             try bundler.output_files.append(
-                options.OutputFile.initBuf(runtime.Runtime.sourceContent(false), bun.default_allocator, Linker.runtime_source_path, .js),
+                options.OutputFile.initBuf(
+                    runtime.Runtime.sourceContent(false),
+                    bun.default_allocator,
+                    Linker.runtime_source_path,
+                    .js,
+                    null,
+                    null,
+                ),
             );
         }
 

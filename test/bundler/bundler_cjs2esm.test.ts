@@ -21,6 +21,57 @@ describe("bundler", () => {
       stdout: "foo",
     },
   });
+  itBundled("cjs2esm/ImportNamedFromExportStarCJSModuleRef", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from './foo';
+        console.log(foo);
+      `,
+      "/foo.js": /* js */ `
+        export * from './bar.cjs';
+      `,
+      "/bar.cjs": /* js */ `
+        module.exports.foo = 'bar';
+      `,
+    },
+    run: {
+      stdout: "bar",
+    },
+  });
+  itBundled("cjs2esm/ImportNamedFromExportStarCJS", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from './foo';
+        console.log(foo);
+      `,
+      "/foo.js": /* js */ `
+        export * from './bar.cjs';
+      `,
+      "/bar.cjs": /* js */ `
+        exports.foo = 'bar';
+      `,
+    },
+    run: {
+      stdout: "bar",
+    },
+  });
+  itBundled("cjs2esm/BadNamedImportNamedReExportedFromCommonJS", {
+    files: {
+      "/entry.js": /* js */ `
+        import {bad} from './foo';
+        console.log(bad);
+      `,
+      "/foo.js": /* js */ `
+        export {bad} from './bar.cjs';
+      `,
+      "/bar.cjs": /* js */ `
+        exports.foo = 'bar';
+      `,
+    },
+    run: {
+      stdout: "undefined",
+    },
+  });
   itBundled("cjs2esm/ExportsFunction", {
     files: {
       "/entry.js": /* js */ `
@@ -101,7 +152,7 @@ describe("bundler", () => {
       `,
     },
     cjs2esm: true,
-    dce: true,
+    minifySyntax: true,
     env: {
       NODE_ENV: "production",
     },
@@ -130,7 +181,7 @@ describe("bundler", () => {
       `,
     },
     cjs2esm: true,
-    dce: true,
+    minifySyntax: true,
     env: {
       NODE_ENV: "development",
     },
@@ -139,13 +190,13 @@ describe("bundler", () => {
     },
   });
   itBundled("cjs2esm/ModuleExportsEqualsRuntimeCondition", {
-    notImplemented: true,
     files: {
       "/entry.js": /* js */ `
         import { foo } from 'lib';
         console.log(foo);
       `,
       "/node_modules/lib/index.js": /* js */ `
+        // if the branch is unknown, we have to include both.
         if (globalThis.USE_PROD) {
           module.exports = require('./library.prod.js')
         } else {
@@ -161,7 +212,11 @@ describe("bundler", () => {
       `,
     },
     cjs2esm: {
-      unhandled: ["/node_modules/lib/index.js"],
+      unhandled: [
+        "/node_modules/lib/index.js",
+        "/node_modules/lib/library.prod.js",
+        "/node_modules/lib/library.dev.js",
+      ],
     },
     run: {
       stdout: "development",

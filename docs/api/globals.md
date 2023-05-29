@@ -80,7 +80,7 @@ Bun implements the following globals.
 
 ---
 
-- `BuildError`
+- `BuildMessage`
 - Bun
 - &nbsp;
 
@@ -194,6 +194,12 @@ Bun implements the following globals.
 
 ---
 
+- [`JSON`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON)
+- Web
+- &nbsp;
+
+---
+
 - [`MessageEvent`](https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent)
 - Web
 - &nbsp;
@@ -266,7 +272,7 @@ Bun implements the following globals.
 
 ---
 
-- `ResolveError`
+- `ResolveMessage`
 - Bun
 - &nbsp;
 

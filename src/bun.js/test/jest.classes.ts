@@ -221,6 +221,19 @@ export default [
         getter: "getRejects",
         this: true,
       },
+      // jest-extended
+      toBeEmpty: {
+        fn: "toBeEmpty",
+        length: 0,
+      },
+      toBeEven: {
+        fn: "toBeEven",
+        length: 0,
+      },
+      toBeOdd: {
+        fn: "toBeOdd",
+        length: 0,
+      },
     },
   }),
 ];

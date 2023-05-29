@@ -5,6 +5,7 @@ pub const VLQ_CONTINUATION_BIT: u32 = VLQ_BASE;
 pub const VLQ_CONTINUATION_MASK: u32 = 1 << VLQ_CONTINUATION_BIT;
 const std = @import("std");
 const bun = @import("root").bun;
+const string = bun.string;
 const JSAst = bun.JSAst;
 const BabyList = JSAst.BabyList;
 const Logger = @import("root").bun.logger;
@@ -34,9 +35,83 @@ pub const SourceMapState = struct {
 };
 
 sources: [][]const u8 = &[_][]u8{},
-sources_content: [][]SourceContent,
+sources_content: []string,
 mapping: Mapping.List = .{},
 allocator: std.mem.Allocator,
+
+pub fn parse(
+    allocator: std.mem.Allocator,
+    json_source: *const Logger.Source,
+    log: *Logger.Log,
+) !SourceMap {
+    var json = try bun.JSON.ParseJSONUTF8(json_source, log, allocator);
+    var mappings = bun.sourcemap.Mapping.List{};
+
+    if (json.get("version")) |version| {
+        if (version.data != .e_number or version.data.e_number.value != 3.0) {
+            return error.@"Unsupported sourcemap version";
+        }
+    }
+
+    if (json.get("mappings")) |mappings_str| {
+        if (mappings_str.data != .e_string) {
+            return error.@"Invalid sourcemap mappings";
+        }
+
+        var parsed = bun.sourcemap.Mapping.parse(allocator, try mappings_str.data.e_string.toUTF8(allocator), null, std.math.maxInt(i32));
+        if (parsed == .fail) {
+            try log.addMsg(bun.logger.Msg{
+                .data = parsed.fail.toData("sourcemap.json"),
+                .kind = .err,
+            });
+            return error.@"Failed to parse sourcemap mappings";
+        }
+
+        mappings = parsed.success;
+    }
+
+    var sources = std.ArrayList(bun.string).init(allocator);
+    var sources_content = std.ArrayList(string).init(allocator);
+
+    if (json.get("sourcesContent")) |mappings_str| {
+        if (mappings_str.data != .e_array) {
+            return error.@"Invalid sourcemap sources";
+        }
+
+        try sources_content.ensureTotalCapacityPrecise(mappings_str.data.e_array.items.len);
+        for (mappings_str.data.e_array.items.slice()) |source| {
+            if (source.data != .e_string) {
+                return error.@"Invalid sourcemap source";
+            }
+
+            try source.data.e_string.toUTF8(allocator);
+            sources_content.appendAssumeCapacity(source.data.e_string.slice());
+        }
+    }
+
+    if (json.get("sources")) |mappings_str| {
+        if (mappings_str.data != .e_array) {
+            return error.@"Invalid sourcemap sources";
+        }
+
+        try sources.ensureTotalCapacityPrecise(mappings_str.data.e_array.items.len);
+        for (mappings_str.data.e_array.items.slice()) |source| {
+            if (source.data != .e_string) {
+                return error.@"Invalid sourcemap source";
+            }
+
+            try source.data.e_string.toUTF8(allocator);
+            sources.appendAssumeCapacity(source.data.e_string.slice());
+        }
+    }
+
+    return SourceMap{
+        .mapping = mappings,
+        .allocator = allocator,
+        .sources_content = sources_content.items,
+        .sources = sources.items,
+    };
+}
 
 pub const Mapping = struct {
     generated: LineColumnOffset,
@@ -315,7 +390,7 @@ pub const Mapping = struct {
     };
 };
 
-pub const LineColumnOffset = packed struct {
+pub const LineColumnOffset = struct {
     lines: i32 = 0,
     columns: i32 = 0,
 
@@ -329,7 +404,23 @@ pub const LineColumnOffset = packed struct {
                 .value => this.value.advance(input),
             }
         }
+
+        pub fn reset(this: *Optional) void {
+            switch (this.*) {
+                .null => {},
+                .value => this.value = .{},
+            }
+        }
     };
+
+    pub fn add(this: *LineColumnOffset, b: LineColumnOffset) void {
+        if (b.lines == 0) {
+            this.columns += b.columns;
+        } else {
+            this.lines += b.lines;
+            this.columns = b.columns;
+        }
+    }
 
     pub fn advance(this: *LineColumnOffset, input: []const u8) void {
         var columns = this.columns;
@@ -339,18 +430,16 @@ pub const LineColumnOffset = packed struct {
             std.debug.assert(i >= offset);
             std.debug.assert(i < input.len);
 
-            columns += @intCast(i32, i - offset);
-            offset = i;
+            var iter = strings.CodepointIterator.initOffset(input, i);
+            var cursor = strings.CodepointIterator.Cursor{ .i = @truncate(u32, iter.i) };
+            _ = iter.next(&cursor);
+            offset = i + cursor.width;
 
-            var cp = strings.CodepointIterator.initOffset(input, offset);
-            var cursor = strings.CodepointIterator.Cursor{};
-            _ = cp.next(&cursor);
             switch (cursor.c) {
                 '\r', '\n', 0x2028, 0x2029 => {
                     // Handle Windows-specific "\r\n" newlines
-                    if (cp.c == '\r' and input.len > offset + 1 and input[offset + 1] == '\n') {
+                    if (cursor.c == '\r' and input.len > i + 1 and input[i + 1] == '\n') {
                         columns += 1;
-                        offset += 1;
                         continue;
                     }
 
@@ -366,8 +455,10 @@ pub const LineColumnOffset = packed struct {
                 },
             }
         }
+    }
 
-        columns += @intCast(i32, input.len - offset);
+    pub fn comesBefore(a: LineColumnOffset, b: LineColumnOffset) bool {
+        return a.lines < b.lines or (a.lines == b.lines and a.columns < b.columns);
     }
 
     pub fn cmp(_: void, a: LineColumnOffset, b: LineColumnOffset) std.math.Order {
@@ -392,10 +483,103 @@ pub fn find(
     return Mapping.find(this.mapping, line, column);
 }
 
+pub const SourceMapShifts = struct {
+    before: LineColumnOffset,
+    after: LineColumnOffset,
+};
+
 pub const SourceMapPieces = struct {
     prefix: std.ArrayList(u8),
     mappings: std.ArrayList(u8),
     suffix: std.ArrayList(u8),
+
+    pub fn init(allocator: std.mem.Allocator) SourceMapPieces {
+        return .{
+            .prefix = std.ArrayList(u8).init(allocator),
+            .mappings = std.ArrayList(u8).init(allocator),
+            .suffix = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    pub fn hasContent(this: *SourceMapPieces) bool {
+        return (this.prefix.items.len + this.mappings.items.len + this.suffix.items.len) > 0;
+    }
+
+    pub fn finalize(this: *SourceMapPieces, allocator: std.mem.Allocator, _shifts: []SourceMapShifts) ![]const u8 {
+        var shifts = _shifts;
+        var start_of_run: usize = 0;
+        var current: usize = 0;
+        var generated = LineColumnOffset{};
+        var prev_shift_column_delta: i32 = 0;
+        var j = Joiner{};
+
+        j.push(this.prefix.items);
+        const mappings = this.mappings.items;
+
+        while (current < mappings.len) {
+            if (mappings[current] == ';') {
+                generated.lines += 1;
+                generated.columns = 0;
+                prev_shift_column_delta = 0;
+                current += 1;
+                continue;
+            }
+
+            var potential_end_of_run = current;
+
+            var decode_result = decodeVLQ(mappings, current);
+            generated.columns += decode_result.value;
+            current = decode_result.start;
+
+            var potential_start_of_run = current;
+
+            current = decodeVLQ(mappings, current).start;
+            current = decodeVLQ(mappings, current).start;
+            current = decodeVLQ(mappings, current).start;
+
+            if (current < mappings.len) {
+                var c = mappings[current];
+                if (c != ',' and c != ';') {
+                    current = decodeVLQ(mappings, current).start;
+                }
+            }
+
+            if (current < mappings.len and mappings[current] == ',') {
+                current += 1;
+            }
+
+            var did_cross_boundary = false;
+            if (shifts.len > 1 and shifts[1].before.comesBefore(generated)) {
+                shifts = shifts[1..];
+                did_cross_boundary = true;
+            }
+
+            if (!did_cross_boundary) {
+                continue;
+            }
+
+            var shift = shifts[0];
+            if (shift.after.lines != generated.lines) {
+                continue;
+            }
+
+            j.push(mappings[start_of_run..potential_end_of_run]);
+
+            std.debug.assert(shift.before.lines == shift.after.lines);
+
+            var shift_column_delta = shift.after.columns - shift.before.columns;
+            const encode = encodeVLQ(decode_result.value + shift_column_delta - prev_shift_column_delta);
+            j.push(encode.bytes[0..encode.len]);
+            prev_shift_column_delta = shift_column_delta;
+
+            start_of_run = potential_start_of_run;
+        }
+
+        j.push(mappings[start_of_run..]);
+        j.push(this.suffix.items);
+
+        return try j.done(allocator);
+    }
 };
 
 // -- comment from esbuild --
@@ -407,18 +591,18 @@ pub const SourceMapPieces = struct {
 // After all chunks are computed, they are joined together in a second pass.
 // This rewrites the first mapping in each chunk to be relative to the end
 // state of the previous chunk.
-pub fn appendSourceMapChunk(j: *Joiner, prev_end_state_: SourceMapState, start_state_: SourceMapState, source_map_: MutableString) !void {
+pub fn appendSourceMapChunk(j: *Joiner, allocator: std.mem.Allocator, prev_end_state_: SourceMapState, start_state_: SourceMapState, source_map_: bun.string) !void {
     var prev_end_state = prev_end_state_;
     var start_state = start_state_;
     // Handle line breaks in between this mapping and the previous one
     if (start_state.generated_line > 0) {
-        j.append(try strings.repeatingAlloc(source_map_.allocator, @intCast(usize, start_state.generated_line), ';'), 0, source_map_.allocator);
+        j.append(try strings.repeatingAlloc(allocator, @intCast(usize, start_state.generated_line), ';'), 0, allocator);
         prev_end_state.generated_column = 0;
     }
 
-    var source_map = source_map_.list.items;
+    var source_map = source_map_;
     if (strings.indexOfNotChar(source_map, ';')) |semicolons| {
-        j.append(source_map[0..semicolons], 0, null);
+        j.push(source_map[0..semicolons]);
         source_map = source_map[semicolons..];
         prev_end_state.generated_column = 0;
         start_state.generated_column = 0;
@@ -448,13 +632,13 @@ pub fn appendSourceMapChunk(j: *Joiner, prev_end_state_: SourceMapState, start_s
     start_state.original_column += original_column_.value;
 
     j.append(
-        appendMappingToBuffer(MutableString.initEmpty(source_map.allocator), j.lastByte(), prev_end_state, start_state).list.items,
+        appendMappingToBuffer(MutableString.initEmpty(allocator), j.lastByte(), prev_end_state, start_state).list.items,
         0,
-        source_map.allocator,
+        allocator,
     );
 
     // Then append everything after that without modification.
-    j.append(source_map_.list.items, @truncate(u32, @ptrToInt(source_map.ptr) - @ptrToInt(source_map_.list.items.ptr)), source_map_.allocator);
+    j.push(source_map);
 }
 
 const vlq_lookup_table: [256]VLQ = brk: {
@@ -638,18 +822,14 @@ pub const LineOffsetTable = struct {
 
     pub const List = std.MultiArrayList(LineOffsetTable);
 
-    pub fn findLine(list: List, loc: Logger.Loc) i32 {
-        const byte_offsets_to_start_of_line = list.items(.byte_offset_to_start_of_line);
-        var original_line: u32 = 0;
-        if (loc.start <= -1) {
-            return 0;
-        }
-
-        const loc_start = @intCast(u32, loc.start);
+    pub fn findLine(byte_offsets_to_start_of_line: []const u32, loc: Logger.Loc) i32 {
+        std.debug.assert(loc.start > -1); // checked by caller
+        var original_line: usize = 0;
+        const loc_start = @intCast(usize, loc.start);
 
         {
-            var count = @truncate(u32, byte_offsets_to_start_of_line.len);
-            var i: u32 = 0;
+            var count = @truncate(usize, byte_offsets_to_start_of_line.len);
+            var i: usize = 0;
             while (count > 0) {
                 const step = count / 2;
                 i = original_line + step;
@@ -1015,6 +1195,8 @@ pub const Chunk = struct {
             prev_loc: Logger.Loc = Logger.Loc.Empty,
             has_prev_state: bool = false,
 
+            line_offset_table_byte_offset_list: []const u32 = &.{},
+
             // This is a workaround for a bug in the popular "source-map" library:
             // https://github.com/mozilla/source-map/issues/261. The library will
             // sometimes return null when querying a source map unless every line
@@ -1031,7 +1213,7 @@ pub const Chunk = struct {
 
             pub const SourceMapper = SourceMapFormat(SourceMapFormatType);
 
-            pub fn generateChunk(b: *ThisBuilder, output: []const u8) Chunk {
+            pub noinline fn generateChunk(b: *ThisBuilder, output: []const u8) Chunk {
                 b.updateGeneratedLineAndColumn(output);
                 if (b.prepend_count) {
                     b.source_map.getBuffer().list.items[0..8].* = @bitCast([8]u8, b.source_map.getBuffer().list.items.len);
@@ -1042,7 +1224,7 @@ pub const Chunk = struct {
                     .mappings_count = b.source_map.getCount(),
                     .end_state = b.prev_state,
                     .final_generated_column = b.generated_column,
-                    .should_ignore = !b.source_map.shouldIgnore(),
+                    .should_ignore = b.source_map.shouldIgnore(),
                 };
             }
 
@@ -1144,7 +1326,7 @@ pub const Chunk = struct {
 
                 b.prev_loc = loc;
                 const list = b.line_offset_tables;
-                const original_line = LineOffsetTable.findLine(list, loc);
+                const original_line = LineOffsetTable.findLine(b.line_offset_table_byte_offset_list, loc);
                 const line = list.get(@intCast(usize, @max(original_line, 0)));
 
                 // Use the line to compute the column
@@ -1182,4 +1364,21 @@ pub const Chunk = struct {
     }
 
     pub const Builder = NewBuilder(VLQSourceMap);
+};
+
+/// https://sentry.engineering/blog/the-case-for-debug-ids
+/// https://github.com/mitsuhiko/source-map-rfc/blob/proposals/debug-id/proposals/debug-id.md
+/// https://github.com/source-map/source-map-rfc/pull/20
+/// https://github.com/getsentry/rfcs/blob/main/text/0081-sourcemap-debugid.md#the-debugid-format
+pub const DebugIDFormatter = struct {
+    id: u64 = 0,
+
+    pub fn format(self: DebugIDFormatter, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        // The RFC asks for a UUID, which is 128 bits (32 hex chars). Our hashes are only 64 bits.
+        // We fill the end of the id with "bun!bun!" hex encoded
+        var buf: [32]u8 = undefined;
+        const formatter = bun.fmt.hexIntUpper(self.id);
+        _ = std.fmt.bufPrint(&buf, "{}64756e2164756e21", .{formatter}) catch unreachable;
+        try writer.writeAll(&buf);
+    }
 };

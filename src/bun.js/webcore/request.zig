@@ -133,18 +133,24 @@ pub const Request = struct {
             defer formatter.indent -|= 1;
 
             try formatter.writeIndent(Writer, writer);
-            try writer.writeAll("method: \"");
+            try writer.writeAll(comptime Output.prettyFmt("<r>method<d>:<r> \"", enable_ansi_colors));
+
             try writer.writeAll(bun.asByteSlice(@tagName(this.method)));
             try writer.writeAll("\"");
             formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
-            try writer.writeAll("url: \"");
+            try writer.writeAll(comptime Output.prettyFmt("<r>url<d>:<r> ", enable_ansi_colors));
             try this.ensureURL();
-            try writer.print(comptime Output.prettyFmt("<r><b>{s}<r>", enable_ansi_colors), .{this.url});
+            try writer.print(comptime Output.prettyFmt("\"<b>{s}<r>\"", enable_ansi_colors), .{this.url});
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            try writer.writeAll("\n");
 
-            try writer.writeAll("\"");
+            try formatter.writeIndent(Writer, writer);
+            try writer.writeAll(comptime Output.prettyFmt("<r>headers<d>:<r> ", enable_ansi_colors));
+            formatter.printAs(.Private, Writer, writer, this.getHeaders(formatter.globalThis), .DOMWrapper, enable_ansi_colors);
+
             if (this.body.value == .Blob) {
                 try writer.writeAll("\n");
                 try formatter.writeIndent(Writer, writer);
@@ -473,11 +479,7 @@ pub const Request = struct {
             if (value_type == .DOMWrapper) {
                 if (value.as(Request)) |request| {
                     if (values_to_try.len == 1) {
-                        request.cloneInto(&req, globalThis.allocator(), globalThis);
-                        if (req.url_was_allocated) {
-                            req.url = req.url;
-                            req.url_was_allocated = true;
-                        }
+                        request.cloneInto(&req, globalThis.allocator(), globalThis, fields.contains(.url));
                         return req;
                     }
 
@@ -723,6 +725,7 @@ pub const Request = struct {
         req: *Request,
         allocator: std.mem.Allocator,
         globalThis: *JSGlobalObject,
+        preserve_url: bool,
     ) void {
         this.ensureURL() catch {};
 
@@ -731,13 +734,16 @@ pub const Request = struct {
             return;
         };
 
+        const original_url = req.url;
+
         req.* = Request{
             .body = body,
-            .url = allocator.dupe(u8, this.url) catch {
+            .url = if (preserve_url) original_url else allocator.dupe(u8, this.url) catch {
                 _ = body.unref();
                 globalThis.throw("Failed to clone request", .{});
                 return;
             },
+            .url_was_allocated = if (preserve_url) req.url_was_allocated else true,
             .method = this.method,
             .headers = this.cloneHeaders(globalThis),
         };
@@ -749,7 +755,7 @@ pub const Request = struct {
 
     pub fn clone(this: *Request, allocator: std.mem.Allocator, globalThis: *JSGlobalObject) *Request {
         var req = allocator.create(Request) catch unreachable;
-        this.cloneInto(req, allocator, globalThis);
+        this.cloneInto(req, allocator, globalThis, false);
         return req;
     }
 };

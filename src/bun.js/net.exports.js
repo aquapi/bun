@@ -247,7 +247,6 @@ const Socket = (function (InternalSocket) {
         self._securePending = false;
         self.secureConnecting = false;
         self._secureEstablished = !!success;
-
         // Needs getPeerCertificate support (not implemented yet)
         // if (!verifyError && !this.isSessionReused()) {
         //   const hostname = options.servername ||
@@ -356,6 +355,7 @@ const Socket = (function (InternalSocket) {
         var {
           port,
           host,
+          path,
           // TODOs
           localAddress,
           localPort,
@@ -368,7 +368,9 @@ const Socket = (function (InternalSocket) {
           requestCert,
           rejectUnauthorized,
           pauseOnConnect,
+          servername,
         } = port;
+        this.servername = servername;
       }
 
       if (!pauseOnConnect) {
@@ -379,18 +381,32 @@ const Socket = (function (InternalSocket) {
 
       const bunTLS = this[bunTlsSymbol];
       var tls = undefined;
+
       if (typeof bunTLS === "function") {
         tls = bunTLS.call(this, port, host, true);
-        //Client always request Cert
+        // Client always request Cert
         this._requestCert = true;
         this._rejectUnauthorized = rejectUnauthorized;
+
+        if (tls) {
+          // TLS can true/false or options
+          if (typeof tls !== "object") {
+            tls = {
+              rejectUnauthorized: rejectUnauthorized,
+              requestCert: true,
+            };
+          } else {
+            tls.rejectUnauthorized = rejectUnauthorized;
+            tls.requestCert = true;
+          }
+        }
+
         this.authorized = false;
         this.secureConnecting = true;
         this._secureEstablished = false;
         this._securePending = true;
         if (connectListener) this.on("secureConnect", connectListener);
       } else if (connectListener) this.on("connect", connectListener);
-
       bunConnect(
         path
           ? {
@@ -515,18 +531,12 @@ const Socket = (function (InternalSocket) {
 );
 
 function createConnection(port, host, connectListener) {
-  if (typeof host == "function") {
-    connectListener = host;
-    host = undefined;
+  if (typeof port === "object") {
+    // port is option pass Socket options and let connect handle connection options
+    return new Socket(port).connect(port, host, connectListener);
   }
-  var options =
-    typeof port == "object"
-      ? port
-      : {
-          host: host,
-          port: port,
-        };
-  return new Socket(options).connect(options, connectListener);
+  // port is path or host, let connect handle this
+  return new Socket().connect(port, host, connectListener);
 }
 
 const connect = createConnection;

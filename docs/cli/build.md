@@ -1,10 +1,6 @@
-{% callout %}
-**Note** — Available in the Bun v0.6.0 nightly. Run `bun upgrade --canary` to try it out.
-{% /callout %}
-
 Bun's fast native bundler is now in beta. It can be used via the `bun build` CLI command or the `Bun.build()` JavaScript API.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -18,6 +14,10 @@ $ bun build ./index.tsx --outdir ./build
 ```
 
 {% /codetabs %}
+
+It's fast. The numbers below represent performance on esbuild's [three.js benchmark](https://github.com/oven-sh/bun/tree/main/bench/bundle).
+
+{% image src="/images/bundler-speed.png" caption="Bundling 10 copies of three.js from scratch, with sourcemaps and minification" /%}
 
 ## Why bundle?
 
@@ -55,7 +55,7 @@ Here, `index.tsx` is the "entrypoint" to our application. Commonly, this will be
 
 To create our bundle:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -80,7 +80,7 @@ For each file specified in `entrypoints`, Bun will generate a new bundle. This b
     └── index.js
 ```
 
-The contents of the `out/index.js` file looks something like this:
+The contents of `out/index.js` will look something like this:
 
 ```js#out/index.js
 // ...
@@ -176,6 +176,11 @@ Like the Bun runtime, the bundler supports an array of file types out of the box
   console.log(contents); // => "Hello, world!"
   ```
 
+---
+
+- `.node` `.wasm`
+- These files are supported by the Bun runtime, but during bundling they are treated as [assets](#assets).
+
 {% /table %}
 
 ### Assets
@@ -184,19 +189,14 @@ If the bundler encounters an import with an unrecognized extension, it treats th
 
 {% codetabs %}
 
-```ts#Build file
-await Bun.build({
-  entrypoints: ['./index.ts'],
-  outdir: './out'
-})
-```
-
 ```ts#Input
+// bundle entrypoint
 import logo from "./logo.svg";
 console.log(logo);
 ```
 
 ```ts#Output
+// bundled output
 var logo = "./logo-ab237dfe.svg";
 console.log(logo);
 ```
@@ -211,7 +211,7 @@ Refer to the [Bundler > Loaders](/docs/bundler/loaders#file) page for more compl
 
 ### Plugins
 
-The behavior described in this table can be overridden with [plugins](/docs/bundler/plugins). Refer to the [Bundler > Loaders](/docs/bundler/plugins) page for complete documentation.
+The behavior described in this table can be overridden or extended with [plugins](/docs/bundler/plugins). Refer to the [Bundler > Loaders](/docs/bundler/plugins) page for complete documentation.
 
 ## API
 
@@ -219,15 +219,13 @@ The behavior described in this table can be overridden with [plugins](/docs/bund
 
 **Required.** An array of paths corresponding to the entrypoints of our application. One bundle will be generated for each entrypoint.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 const result = await Bun.build({
-  entrypoints: ['./index.ts']
-}); // => Promise
-
-await result;
-// => { outputs: Array<{ path: string; result: Blob }> }
+  entrypoints: ["./index.ts"],
+});
+// => { success: boolean, outputs: BuildArtifact[], logs: BuildMessage[] }
 ```
 
 ```bash#CLI
@@ -242,48 +240,49 @@ $ bun build --entrypoints ./index.ts
 
 The directory where output files will be written.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 const result = await Bun.build({
   entrypoints: ['./index.ts'],
   outdir: './out'
 });
-
-result;
-// => { outputs: Array<{ path: string; result: BunFile }> }
+// => { success: boolean, outputs: BuildArtifact[], logs: BuildMessage[] }
 ```
 
 ```bash#CLI
 $ bun build --entrypoints ./index.ts --outdir ./out
-# the bundle will be printed to stdout
-# ...
+# a summary of bundled files will be printed to stdout
 ```
 
 {% /codetabs %}
 
-When `outdir` is specified:
+If `outdir` is not passed to the JavaScript API, bundled code will not be written to disk. Bundled files are returned in an array of `BuildArtifact` objects. These objects are Blobs with extra properties; see [Outputs](#outputs) for complete documentation.
 
-- The JavaScript API will write the generated bundles to the appropriate location in `outdir`. The result of the `Bun.build()` call will contain `BunFile` instances corresponding to the new files.
+```ts
+const result = await Bun.build({
+  entrypoints: ["./index.ts"],
+});
 
-  ```ts
-  const result = await Bun.build({
-    /* ... */
-  });
-  // => { outputs: Array<{ path: string; result: BunFile }> }
+for (const result of result.outputs) {
+  // Can be consumed as blobs
+  await result.text();
 
-  for (const { path, result } of result.outputs) {
-    console.log(`Wrote file: ${path}`);
-  }
-  ```
+  // Bun will set Content-Type and Etag headers
+  new Response(result);
 
-- The CLI will print a summary of the written files. The bundled code will not be written to `stdout`.
+  // Can be written manually, but you should use `outdir` in this case.
+  Bun.write(path.join("out", result.path), result);
+}
+```
+
+When `outdir` is set, the `path` property on a `BuildArtifact` will be the absolute path to where it was written to.
 
 ### `target`
 
 The intended execution environment for the bundle.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -317,14 +316,20 @@ Depending on the target, Bun will apply different module resolution rules and op
 
   All bundles generated with `target: "bun"` are marked with a special `// @bun` pragma, which indicates to the Bun runtime that there's no need to re-transpile the file before execution.
 
+  If any entrypoints contains a Bun shebang (`#!/usr/bin/env bun`) the bundler will default to `target: "bun"` instead of `"browser`.
+
 ---
 
 - `node`
-- For generating bundles that are intended to be run by Node.js. Prioritizes the `"node"` export condition when resolving imports. In the future, this will automatically polyfill the `Bun` global and other built-in `bun:*` modules, though this is not yet implemented.
+- For generating bundles that are intended to be run by Node.js. Prioritizes the `"node"` export condition when resolving imports, and outputs `.mjs`. In the future, this will automatically polyfill the `Bun` global and other built-in `bun:*` modules, though this is not yet implemented.
 
 {% /table %}
 
-<!-- ### `module`
+{% callout %}
+
+{% /callout %}
+
+### `format`
 
 Specifies the module format to be used in the generated bundles.
 
@@ -332,7 +337,7 @@ Currently the bundler only supports one module format: `"esm"`. Support for `"cj
 
 {% codetabs %}
 
-```ts#Bun.build
+```ts#JavaScript
 await Bun.build({
   entrypoints: ['./index.tsx'],
   outdir: './out',
@@ -344,13 +349,13 @@ await Bun.build({
 $ bun build ./index.tsx --outdir ./out --format esm
 ```
 
-{% /codetabs %} -->
+{% /codetabs %}
 
 <!-- ### `bundling`
 
 Whether to enable bundling.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -369,7 +374,7 @@ $ bun build ./index.tsx --outdir ./out
 
 Set to `false` to disable bundling. Instead, files will be transpiled and individually written to `outdir`.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -389,7 +394,7 @@ $ bun build ./index.tsx --outdir ./out --no-bundling
 
 Whether to enable code splitting.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -425,7 +430,7 @@ export const shared = 'shared';
 
 To bundle `entry-a.ts` and `entry-b.ts` with code-splitting enabled:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -461,7 +466,7 @@ The generated `chunk-2fce6291bf86559d.js` file contains the shared code. To avoi
 
 A list of plugins to use during bundling.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -479,7 +484,7 @@ n/a
 
 Bun implements a univeral plugin system for both Bun's runtime and bundler. Refer to the [plugin documentation](/docs/bundler/plugins) for complete documentation.
 
-### `manifest`
+<!-- ### `manifest`
 
 Whether to return a build manifest in the result of `Bun.build`.
 
@@ -538,24 +543,24 @@ export type ImportKind =
 
 {% /details %}
 
-By design, the manifest is a simple JSON object that can easily be serialized or written to disk. It is also compatible with esbuild's [`metafile`](https://esbuild.github.io/api/#metafile) format.
+By design, the manifest is a simple JSON object that can easily be serialized or written to disk. It is also compatible with esbuild's [`metafile`](https://esbuild.github.io/api/#metafile) format. -->
 
 ### `sourcemap`
 
 Specifies the type of sourcemap to generate.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
   entrypoints: ['./index.tsx'],
   outdir: './out',
-  sourcemap: "inline", // default "none"
+  sourcemap: "external", // default "none"
 })
 ```
 
 ```bash#CLI
-$ bun build ./index.tsx --outdir ./out --sourcemap=inline
+$ bun build ./index.tsx --outdir ./out --sourcemap=external
 ```
 
 {% /codetabs %}
@@ -570,7 +575,13 @@ $ bun build ./index.tsx --outdir ./out --sourcemap=inline
 ---
 
 - `"inline"`
-- A sourcemap is generated and appended to the end of the generated bundle as a base64 payload inside a `//# sourceMappingURL=` comment.
+- A sourcemap is generated and appended to the end of the generated bundle as a base64 payload.
+
+  ```ts
+  // <bundled code here>
+
+  //# sourceMappingURL=data:application/json;base64,<encoded sourcemap here>
+  ```
 
 ---
 
@@ -578,6 +589,20 @@ $ bun build ./index.tsx --outdir ./out --sourcemap=inline
 - A separate `*.js.map` file is created alongside each `*.js` bundle.
 
 {% /table %}
+
+{% callout %}
+
+Generated bundles contain a [debug id](https://sentry.engineering/blog/the-case-for-debug-ids) that can be used to associate a bundle with its corresponding sourcemap. This `debugId` is added as a comment at the bottom of the file.
+
+```ts
+// <generated bundle code>
+
+//# debugId=<DEBUG ID>
+```
+
+The associated `*.js.map` sourcemap will be a JSON file containing an equivalent `debugId` property.
+
+{% /callout %}
 
 ### `minify`
 
@@ -589,7 +614,7 @@ When targeting `bun`, identifiers will be minified by default.
 
 To enable all minification options:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -607,7 +632,7 @@ $ bun build ./index.tsx --outdir ./out --minify
 
 To granularly enable certain minifications:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -635,7 +660,7 @@ boolean; -->
 
 A list of import paths to consider _external_. Defaults to `[]`.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -665,7 +690,7 @@ console.log(_.upperCase(value));
 
 Normally, bundling `index.tsx` would generate a bundle containing the entire source code of the `"zod"` package. If instead, we want to leave the `import` statement as-is, we can mark it as external:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -694,11 +719,29 @@ var value = z.string().parse("Hello world!")
 console.log(_.upperCase(value));
 ```
 
+To mark all imports as external, use the wildcard `*`:
+
+{% codetabs %}
+
+```ts#JavaScript
+await Bun.build({
+  entrypoints: ['./index.tsx'],
+  outdir: './out',
+  external: ['*'],
+})
+```
+
+```bash#CLI
+$ bun build ./index.tsx --outdir ./out --external '*'
+```
+
+{% /codetabs %}
+
 ### `naming`
 
 Customizes the generated file names. Defaults to `./[dir]/[name].[ext]`.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -773,7 +816,7 @@ For example:
 
 We can combine these tokens to create a template string. For instance, to include the hash in the generated bundle names:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -801,7 +844,7 @@ This build would result in the following file structure:
 
 When a `string` is provided for the `naming` field, it is used only for bundles _that correspond to entrypoints_. The names of [chunks](#splitting) and copied assets are not affected. Using the JavaScript API, separate template strings can be specified for each type of generated file.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -822,11 +865,11 @@ $ bun build ./index.tsx --outdir ./out --entry-naming "[dir]/[name].[ext]" --chu
 
 {% /codetabs %}
 
-<!-- ### `root`
+### `root`
 
 The root directory of the project.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -853,7 +896,7 @@ If unspecified, it is computed to be the first common ancestor of all entrypoint
 
 We can build both entrypoints in the `pages` directory:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -884,7 +927,7 @@ Since the `pages` directory is the first common ancestor of the entrypoint files
 
 This behavior can be overridden by specifying the `root` option:
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -911,7 +954,7 @@ By specifying `.` as `root`, the generated file structure will look like this:
   └── pages
     └── index.js
     └── settings.js
-``` -->
+```
 
 ### `publicPath`
 
@@ -945,7 +988,7 @@ console.log(logo);
 
 Setting `publicPath` will prefix all file paths with the specified value.
 
-{% codetabs %}
+{% codetabs group="a" %}
 
 ```ts#JavaScript
 await Bun.build({
@@ -968,35 +1011,324 @@ The output file would now look something like this.
 + var logo = 'https://cdn.example.com/logo-a7305bdef.svg';
 ```
 
+### `define`
+
+A map of global identifiers to be replaced at build time. Keys of this object are identifier names, and values are JSON strings that will be inlined.
+
+{% callout }
+This is not needed to inline `process.env.NODE_ENV`, as Bun does this automatically.
+{% /callout %}
+
+{% codetabs %}
+
+```ts#JavaScript
+await Bun.build({
+  entrypoints: ['./index.tsx'],
+  outdir: './out',
+  define: {
+    STRING: JSON.stringify("value"),
+    "nested.boolean": "true",
+  },
+})
+```
+
+```bash#CLI
+$ bun build ./index.tsx --outdir ./out --define 'STRING="value"' --define "nested.boolean=true"
+```
+
+{% /codetabs %}
+
+### `loader`
+
+A map of file extensions to [built-in loader names](https://bun.sh/docs/bundler/loaders#built-in-loaders). This can be used to quickly customize how certain file files are loaded.
+
+{% codetabs %}
+
+```ts#JavaScript
+await Bun.build({
+  entrypoints: ['./index.tsx'],
+  outdir: './out',
+  loader: {
+    ".png": "dataurl",
+    ".txt": "file",
+  },
+})
+```
+
+```bash#CLI
+$ bun build ./index.tsx --outdir ./out --loader .png:dataurl --loader .txt:file
+```
+
+{% /codetabs %}
+
+## Outputs
+
+The `Bun.build` function returns a `Promise<BuildOutput>`, defined as:
+
+```ts
+interface BuildOutput {
+  outputs: BuildArtifact[];
+  success: boolean;
+  logs: Array<object>; // see docs for details
+}
+
+interface BuildArtifact extends Blob {
+  kind: "entry-point" | "chunk" | "asset" | "sourcemap";
+  path: string;
+  loader: Loader;
+  hash: string | null;
+  sourcemap: BuildArtifact | null;
+}
+```
+
+The `outputs` array contains all the files that were generated by the build. Each artifact implements the `Blob` interface.
+
+```ts
+const build = Bun.build({
+  /* */
+});
+
+for (const output of build.outputs) {
+  await output.arrayBuffer(); // => ArrayBuffer
+  await output.text(); // string
+}
+```
+
+Each artifact also contains the following properties:
+
+{% table %}
+
+---
+
+- `kind`
+- What kind of build output this file is. A build generates bundled entrypoints, code-split "chunks", sourcemaps, and copied assets (like images).
+
+---
+
+- `path`
+- Absolute path to the file on disk
+
+---
+
+- `loader`
+- The loader was used to interpret the file. See [Bundler > Loaders](/docs/bundler/loaders) to see how Bun maps file extensions to the appropriate built-in loader.
+
+---
+
+- `hash`
+- The hash of the file contents. Always defined for assets.
+
+---
+
+- `sourcemap`
+- The sourcemap file corresponding to this file, if generated. Only defined for entrypoints and chunks.
+
+{% /table %}
+
+Similar to `BunFile`, `BuildArtifact` objects can be passed directly into `new Response()`.
+
+```ts
+const build = Bun.build({
+  /* */
+});
+
+const artifact = build.outputs[0];
+
+// Content-Type header is automatically set
+return new Response(artifact);
+```
+
+The Bun runtime implements special pretty-printing of `BuildArtifact` object to make debugging easier.
+
+{% codetabs %}
+
+```ts#Build_script
+// build.ts
+const build = Bun.build({/* */});
+
+const artifact = build.outputs[0];
+console.log(artifact);
+```
+
+```sh#Shell_output
+$ bun run build.ts
+BuildArtifact (entry-point) {
+  path: "./index.js",
+  loader: "tsx",
+  kind: "entry-point",
+  hash: "824a039620219640",
+  Blob (114 bytes) {
+    type: "text/javascript;charset=utf-8"
+  },
+  sourcemap: null
+}
+```
+
+{% /codetabs %}
+
+### Executables
+
+Bun supports "compiling" a JavaScript/TypeScript entrypoint into a standalone executable. This executable contains a copy of the Bun binary.
+
+```sh
+$ bun build ./cli.tsx --outfile mycli --compile
+$ ./mycli
+```
+
+Refer to [Bundler > Executables](/docs/bundler/executables) for complete documentation.
+
+## Logs and errors
+
+`Bun.build` only throws if invalid options are provided. Read the `success` property to determine if the build was successful; the `logs` property will contain additional details.
+
+```ts
+const result = await Bun.build({
+  entrypoints: ["./index.tsx"],
+  outdir: "./out",
+});
+
+if (!result.success) {
+  console.error("Build failed");
+  for (const message of result.logs) {
+    // Bun will pretty print the message object
+    console.error(message);
+  }
+}
+```
+
+Each message is either a `BuildMessage` or `ResolveMessage` object, which can be used to trace what problems happened in the build.
+
+```ts
+class BuildMessage {
+  name: string;
+  position?: Position;
+  message: string;
+  level: "error" | "warning" | "info" | "debug" | "verbose";
+}
+
+class ResolveMessage extends BuildMessage {
+  code: string;
+  referrer: string;
+  specifier: string;
+  importKind: ImportKind;
+}
+```
+
+If you want to throw an error from a failed build, consider passing the logs to an `AggregateError`. If uncaught, Bun will pretty-print the contained messages nicely.
+
+```ts
+if (!result.success) {
+  throw new AggregateError(result.logs, "Build failed");
+}
+```
+
 ## Reference
 
 ```ts
-await Bun.build({
-  entrypoints: string[]; // list of file path
-  outdir?: string; // default to in-memory build
-  target?: "browser" | "bun" | "node"; // default: "browser"
-  splitting?: boolean; // default true
-  plugins?: BunPlugin[];
-  manifest?: boolean; // default false
-  external?: string[];
-  naming?: string | {
-    entry?: string; // default '[dir]/[name].[ext]'
-    chunk?: string; // default '[name]-[hash].[ext]'
-    asset?: string; // default '[name]-[hash].[ext]'
-  };
+interface Bun {
+  build(options: BuildOptions): Promise<BuildOutput>;
+}
+
+interface BuildOptions {
+  entrypoints: string[]; // required
+  outdir?: string; // default: no write (in-memory only)
+  format?: "esm"; // later: "cjs" | "iife"
+  target?: "browser" | "bun" | "node"; // "browser"
+  splitting?: boolean; // true
+  plugins?: BunPlugin[]; // [] // See https://bun.sh/docs/bundler/plugins
+  loader?: { [k in string]: Loader }; // See https://bun.sh/docs/bundler/loaders
+  manifest?: boolean; // false
+  external?: string[]; // []
+  sourcemap?: "none" | "inline" | "external"; // "none"
+  root?: string; // computed from entrypoints
+  naming?:
+    | string
+    | {
+        entry?: string; // '[dir]/[name].[ext]'
+        chunk?: string; // '[name]-[hash].[ext]'
+        asset?: string; // '[name]-[hash].[ext]'
+      };
   publicPath?: string; // e.g. http://mydomain.com/
-  minify?: boolean | { // default false
-    identifiers?: boolean;
-    whitespace?: boolean;
-    syntax?: boolean;
-  };
-});
+  minify?:
+    | boolean // false
+    | {
+        identifiers?: boolean;
+        whitespace?: boolean;
+        syntax?: boolean;
+      };
+}
+
+interface BuildOutput {
+  outputs: BuildArtifact[];
+  success: boolean;
+  logs: Array<BuildMessage | ResolveMessage>;
+}
+
+interface BuildArtifact extends Blob {
+  path: string;
+  loader: Loader;
+  hash?: string;
+  kind: "entry-point" | "chunk" | "asset" | "sourcemap";
+  sourcemap?: BuildArtifact;
+}
+
+type Loader = "js" | "jsx" | "ts" | "tsx" | "json" | "toml" | "file" | "napi" | "wasm" | "text";
+
+interface BuildOutput {
+  outputs: BuildArtifact[];
+  success: boolean;
+  logs: Array<BuildMessage | ResolveMessage>;
+}
+
+declare class ResolveMessage {
+  readonly name: "ResolveMessage";
+  readonly position: Position | null;
+  readonly code: string;
+  readonly message: string;
+  readonly referrer: string;
+  readonly specifier: string;
+  readonly importKind:
+    | "entry_point"
+    | "stmt"
+    | "require"
+    | "import"
+    | "dynamic"
+    | "require_resolve"
+    | "at"
+    | "at_conditional"
+    | "url"
+    | "internal";
+  readonly level: "error" | "warning" | "info" | "debug" | "verbose";
+
+  toString(): string;
+}
 ```
 
 <!--
-root?: string; // project root
-format?: "esm"; // later: "cjs", "iife"
-loader?: { [k in string]: Loader };
-sourcemap?: "none" | "inline" | "external"; // default: "none"
-treeshaking?: boolean;
--->
+interface BuildManifest {
+  inputs: {
+    [path: string]: {
+      output: {
+        path: string;
+      };
+      imports: {
+        path: string;
+        kind: ImportKind;
+        external?: boolean;
+        asset?: boolean; // whether the import defaulted to "file" loader
+      }[];
+    };
+  };
+  outputs: {
+    [path: string]: {
+      type: "chunk" | "entrypoint" | "asset";
+      inputs: { path: string }[];
+      imports: {
+        path: string;
+        kind: ImportKind;
+        external?: boolean;
+      }[];
+      exports: string[];
+    };
+  };
+} -->

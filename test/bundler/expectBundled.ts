@@ -12,6 +12,8 @@ import type { Expect } from "bun:test";
 import { PluginBuilder } from "bun";
 import * as esbuild from "esbuild";
 
+let currentFile: string | undefined;
+
 type BunTestExports = typeof import("bun:test");
 export function testForFile(file: string): BunTestExports {
   if (file.startsWith("file://")) {
@@ -20,7 +22,42 @@ export function testForFile(file: string): BunTestExports {
 
   var testFile = testFiles.get(file);
   if (!testFile) {
-    testFile = (Bun as any).jest(file);
+    const native = (Bun as any).jest(file);
+    const notImplemented: BundlerTestRef[] = [];
+    testFile = {
+      it: native.it,
+      test: native.test,
+      expect: native.expect,
+      addNotImplemented: (ref: BundlerTestRef) => notImplemented.push(ref),
+    };
+    testFile.describe = function (name: string, fn: () => void) {
+      native.describe(name, function () {
+        if (currentFile) {
+          throw new Error("please don't nest describe blocks in the bundler tests.");
+        }
+        currentFile = file;
+        fn();
+        currentFile = undefined;
+        if (!FILTER && !process.env.BUN_BUNDLER_TEST_NO_CHECK_SKIPPED) {
+          native.test(`"${path.basename(file)}" has proper notImplemented markers`, async () => {
+            console.log(`\n  Checking if any of the ${notImplemented.length} not implemented tests work...`);
+            const implemented = [];
+            for (const ref of notImplemented) {
+              try {
+                await expectBundled(ref.id, { ...ref.options, notImplemented: false }, false, true);
+                implemented.push({ id: ref.id, success: true });
+              } catch (e) {}
+            }
+            if (implemented.length) {
+              throw (
+                '"notImplemented" can only be used on failing tests. the following tests pass:\n' +
+                implemented.map(x => "  - " + x.id).join("\n")
+              );
+            }
+          });
+        }
+      });
+    };
     testFiles.set(file, testFile);
   }
   return testFile;
@@ -34,8 +71,8 @@ const DEBUG = process.env.BUN_BUNDLER_TEST_DEBUG;
 const FILTER = process.env.BUN_BUNDLER_TEST_FILTER;
 /** Set this to hide skips */
 const HIDE_SKIP = process.env.BUN_BUNDLER_TEST_HIDE_SKIP;
-/** Path to the bun. TODO: Once bundler is merged, we should remove the `bun-debug` fallback. */
-const BUN_EXE = (process.env.BUN_EXE && Bun.which(process.env.BUN_EXE)) ?? Bun.which("bun-debug") ?? bunExe();
+/** Path to the bun. */
+const BUN_EXE = (process.env.BUN_EXE && Bun.which(process.env.BUN_EXE)) ?? bunExe();
 export const RUN_UNCHECKED_TESTS = false;
 
 const outBaseTemplate = path.join(tmpdir(), "bun-build-tests", `${ESBUILD ? "esbuild" : "bun"}-`);
@@ -63,12 +100,14 @@ export interface BundlerTestInput {
   entryPointsAdvanced?: Array<{ input: string; output?: string }>;
   /** These are not path resolved. Used for `default/RelativeEntryPointError` */
   entryPointsRaw?: string[];
-  /** Defaults to bundle */
-  mode?: "bundle" | "transform";
+  /** Defaults to true */
+  bundling?: boolean;
   /** Used for `default/ErrorMessageCrashStdinESBuildIssue2913`. */
   stdin?: { contents: string; cwd: string };
   /** Use when doing something weird with entryPoints and you need to check other output paths. */
   outputPaths?: string[];
+  /** Use --compile */
+  compile?: boolean;
 
   /** force using cli or js api. defaults to api if possible, then cli otherwise */
   backend?: "cli" | "api";
@@ -96,7 +135,7 @@ export interface BundlerTestInput {
     factory?: string; // for classic
     fragment?: string; // for classic
   };
-  outbase?: string;
+  root?: string;
   /** Defaults to `/out.js` */
   outfile?: string;
   /** Defaults to `/out` */
@@ -116,13 +155,15 @@ export interface BundlerTestInput {
   targetFromAPI?: "TargetWasConfigured";
   minifyWhitespace?: boolean;
   splitting?: boolean;
+  serverComponents?: boolean;
   treeShaking?: boolean;
   unsupportedCSSFeatures?: string[];
   unsupportedJSFeatures?: string[];
   /** if set to true or false, create or edit tsconfig.json to set compilerOptions.useDefineForClassFields */
   useDefineForClassFields?: boolean;
-  sourceMap?: boolean | "inline" | "external";
+  sourceMap?: "inline" | "external" | "none";
   plugins?: BunPlugin[] | ((builder: PluginBuilder) => void | Promise<void>);
+  install?: string[];
 
   // pass subprocess.env
   env?: Record<string, any>;
@@ -184,6 +225,9 @@ export interface BundlerTestInput {
 
   /** Run after bundle happens but before runtime. */
   onAfterBundle?(api: BundlerTestBundleAPI): void;
+
+  /* TODO: remove this from the tests after this is implemented */
+  skipIfWeDidNotImplementWildcardSideEffects?: boolean;
 }
 
 export interface BundlerTestBundleAPI {
@@ -202,7 +246,7 @@ export interface BundlerTestBundleAPI {
    */
   captureFile(file: string, fnName?: string): string[];
 
-  warnings: Record<string, { file: string; error: string; line?: string; col?: string }[]>;
+  warnings: Record<string, ErrorMeta[]>;
   options: BundlerTestInput;
 }
 
@@ -232,11 +276,24 @@ export interface BundlerTestRunOptions {
 /** given when you do itBundled('id', (this object) => BundlerTestInput) */
 export interface BundlerTestWrappedAPI {
   root: string;
+  getConfigRef: () => BuildConfig;
+}
+
+let configRef: BuildConfig;
+function getConfigRef() {
+  return configRef;
 }
 
 export interface BundlerTestRef {
   id: string;
   options: BundlerTestInput;
+}
+
+interface ErrorMeta {
+  file: string;
+  error: string;
+  line?: string;
+  col?: string;
 }
 
 var testFiles = new Map();
@@ -251,20 +308,21 @@ function expectBundled(
   dryRun = false,
   ignoreFilter = false,
 ): Promise<BundlerTestRef> | BundlerTestRef {
-  var { expect, it, test } = testForFile(callerSourceOrigin());
+  var { expect, it, test } = testForFile(currentFile ?? callerSourceOrigin());
   if (!ignoreFilter && FILTER && !filterMatches(id)) return testRef(id, opts);
 
   let {
-    notImplemented,
-    bundleWarnings,
-    bundleErrors,
-    banner,
-    backend,
     assertNotPresent,
-    capture,
     assetNaming,
+    backend,
+    banner,
+    bundleErrors,
+    bundleWarnings,
+    bundling,
+    capture,
     chunkNaming,
     cjs2esm,
+    compile,
     dce,
     dceKeepMarkerCount,
     define,
@@ -277,6 +335,7 @@ function expectBundled(
     format,
     globalName,
     inject,
+    install,
     jsx = {},
     keepNames,
     legalComments,
@@ -287,20 +346,21 @@ function expectBundled(
     minifyIdentifiers,
     minifySyntax,
     minifyWhitespace,
-    mode,
+    notImplemented,
     onAfterBundle,
-    outbase,
+    root: outbase,
     outdir,
     outfile,
     outputPaths,
-    target,
     plugins,
     publicPath,
     run,
     runtimeFiles,
+    serverComponents = false,
     skipOnEsbuild,
     sourceMap,
     splitting,
+    target,
     treeShaking,
     unsupportedCSSFeatures,
     unsupportedJSFeatures,
@@ -309,6 +369,10 @@ function expectBundled(
     _referenceFn,
     ...unknownProps
   } = opts;
+
+  if (serverComponents) {
+    splitting = true;
+  }
 
   // TODO: Remove this check once all options have been implemented
   if (Object.keys(unknownProps).length > 0) {
@@ -321,7 +385,7 @@ function expectBundled(
   }
 
   // Resolve defaults for options and some related things
-  mode ??= "bundle";
+  bundling ??= true;
   target ??= "browser";
   format ??= "esm";
   entryPoints ??= entryPointsRaw ? [] : [Object.keys(files)[0]];
@@ -331,6 +395,9 @@ function expectBundled(
   if (bundleWarnings === true) bundleWarnings = {};
   const useOutFile = outfile ? true : outdir ? false : entryPoints.length === 1;
 
+  if (bundling === false && entryPoints.length > 1) {
+    throw new Error("bundling:false only supports a single entry point");
+  }
   if (!ESBUILD && format !== "esm") {
     throw new Error("formats besides esm not implemented in bun build");
   }
@@ -346,17 +413,11 @@ function expectBundled(
   if (!ESBUILD && unsupportedCSSFeatures && unsupportedCSSFeatures.length) {
     throw new Error("unsupportedCSSFeatures not implemented in bun build");
   }
-  if (!ESBUILD && outbase) {
-    throw new Error("outbase not implemented in bun build");
-  }
   if (!ESBUILD && keepNames) {
     throw new Error("keepNames not implemented in bun build");
   }
   if (!ESBUILD && mainFields) {
     throw new Error("mainFields not implemented in bun build");
-  }
-  if (!ESBUILD && sourceMap) {
-    throw new Error("sourceMap not implemented in bun build");
   }
   if (!ESBUILD && banner) {
     throw new Error("banner not implemented in bun build");
@@ -366,7 +427,7 @@ function expectBundled(
   }
   if (!ESBUILD && loader) {
     const loaderValues = [...new Set(Object.values(loader))];
-    const supportedLoaderTypes = ["js", "jsx", "ts", "tsx", "css", "json", "text", "file"];
+    const supportedLoaderTypes = ["js", "jsx", "ts", "tsx", "css", "json", "text", "file", "wtf", "toml"];
     const unsupportedLoaderTypes = loaderValues.filter(x => !supportedLoaderTypes.includes(x));
     if (unsupportedLoaderTypes.length) {
       throw new Error(`loader '${unsupportedLoaderTypes.join("', '")}' not implemented in bun build`);
@@ -393,7 +454,7 @@ function expectBundled(
       external = external.map(x => (typeof x !== "string" ? x : x.replace(/\{\{root\}\}/g, root)));
     }
 
-    outfile = useOutFile ? path.join(root, outfile ?? "/out.js") : undefined;
+    outfile = useOutFile ? path.join(root, outfile ?? (compile ? "/out" : "/out.js")) : undefined;
     outdir = !useOutFile ? path.join(root, outdir ?? "/out") : undefined;
     metafile = metafile ? path.join(root, metafile) : undefined;
     outputPaths = (
@@ -402,16 +463,17 @@ function expectBundled(
         : entryPaths.map(file => path.join(outdir!, path.basename(file)))
     ).map(x => x.replace(/\.ts$/, ".js"));
 
-    if (mode === "transform" && !outfile && !ESBUILD) {
-      throw new Error("transform mode requires one single outfile");
-    }
     if (cjs2esm && !outfile && !minifySyntax && !minifyWhitespace) {
       throw new Error("cjs2esm=true requires one output file, minifyWhitespace=false, and minifySyntax=false");
     }
 
     if (outdir) {
-      entryNaming ??= "[name].[ext]";
+      entryNaming ??= "[dir]/[name].[ext]";
       chunkNaming ??= "[name]-[hash].[ext]";
+    }
+
+    if (outbase) {
+      outbase = path.join(root, outbase);
     }
 
     // Option validation
@@ -422,6 +484,16 @@ function expectBundled(
     // Prepare source folder
     if (existsSync(root)) {
       rmSync(root, { recursive: true });
+    }
+    mkdirSync(root, { recursive: true });
+    if (install) {
+      const installProcess = Bun.spawnSync({
+        cmd: [bunExe(), "install", ...install],
+        cwd: root,
+      });
+      if (!installProcess.success) {
+        throw new Error("Failed to install dependencies");
+      }
     }
     for (const [file, contents] of Object.entries(files)) {
       const filename = path.join(root, file);
@@ -450,12 +522,15 @@ function expectBundled(
     }
 
     // Run bun build cli. In the future we can move to using `Bun.Bundler`
-    let warningReference: Record<string, { file: string; error: string; line?: string; col?: string }[]> = {};
+    let warningReference: Record<string, ErrorMeta[]> = {};
+    const expectedErrors = bundleErrors
+      ? Object.entries(bundleErrors).flatMap(([file, v]) => v.map(error => ({ file, error })))
+      : null;
+
     if (backend === "cli") {
       if (plugins) {
         throw new Error("plugins not possible in backend=CLI");
       }
-
       const cmd = (
         !ESBUILD
           ? [
@@ -464,39 +539,41 @@ function expectBundled(
               "build",
               ...entryPaths,
               ...(entryPointsRaw ?? []),
-              mode === "bundle" ? [outfile ? `--outfile=${outfile}` : `--outdir=${outdir}`] : [],
+              bundling === false ? "--no-bundle" : [],
+              compile ? "--compile" : [],
+              outfile ? `--outfile=${outfile}` : `--outdir=${outdir}`,
               define && Object.entries(define).map(([k, v]) => ["--define", `${k}=${v}`]),
               `--target=${target}`,
+              // `--format=${format}`,
               external && external.map(x => ["--external", x]),
               minifyIdentifiers && `--minify-identifiers`,
               minifySyntax && `--minify-syntax`,
               minifyWhitespace && `--minify-whitespace`,
               globalName && `--global-name=${globalName}`,
-              // inject && inject.map(x => ["--inject", path.join(root, x)]),
-              // jsx.preserve && "--jsx=preserve",
               jsx.runtime && ["--jsx-runtime", jsx.runtime],
               jsx.factory && ["--jsx-factory", jsx.factory],
               jsx.fragment && ["--jsx-fragment", jsx.fragment],
               jsx.importSource && ["--jsx-import-source", jsx.importSource],
               // metafile && `--manifest=${metafile}`,
-              // sourceMap && `--sourcemap${sourceMap !== true ? `=${sourceMap}` : ""}`,
-              entryNaming && entryNaming !== "[name].[ext]" && [`--entry-naming`, entryNaming],
+              sourceMap && `--sourcemap=${sourceMap}`,
+              entryNaming && entryNaming !== "[dir]/[name].[ext]" && [`--entry-naming`, entryNaming],
               chunkNaming && chunkNaming !== "[name]-[hash].[ext]" && [`--chunk-naming`, chunkNaming],
-              assetNaming && assetNaming !== "[name]-[hash].[ext]" && [`--asset-naming`, chunkNaming],
-              // `--format=${format}`,
-              // legalComments && `--legal-comments=${legalComments}`,
+              assetNaming && assetNaming !== "[name]-[hash].[ext]" && [`--asset-naming`, assetNaming],
               splitting && `--splitting`,
+              serverComponents && "--server-components",
+              outbase && `--root=${outbase}`,
+              // inject && inject.map(x => ["--inject", path.join(root, x)]),
+              // jsx.preserve && "--jsx=preserve",
+              // legalComments && `--legal-comments=${legalComments}`,
               // treeShaking === false && `--no-tree-shaking`, // ??
-              // outbase && `--outbase=${outbase}`,
               // keepNames && `--keep-names`,
               // mainFields && `--main-fields=${mainFields}`,
               loader && Object.entries(loader).map(([k, v]) => ["--loader", `${k}:${v}`]),
               publicPath && `--public-path=${publicPath}`,
-              mode === "transform" && "--transform",
             ]
           : [
               ESBUILD_PATH,
-              mode === "bundle" && "--bundle",
+              bundling && "--bundle",
               outfile ? `--outfile=${outfile}` : `--outdir=${outdir}`,
               `--format=${format}`,
               `--platform=${target === "bun" ? "node" : target}`,
@@ -507,12 +584,14 @@ function expectBundled(
               external && external.map(x => `--external:${x}`),
               inject && inject.map(x => `--inject:${path.join(root, x)}`),
               define && Object.entries(define).map(([k, v]) => `--define:${k}=${v}`),
-              `--jsx=${jsx.runtime ?? "automatic"}`,
+              `--jsx=${jsx.runtime === "classic" ? "transform" : "automatic"}`,
               // jsx.preserve && "--jsx=preserve",
               jsx.factory && `--jsx-factory=${jsx.factory}`,
               jsx.fragment && `--jsx-fragment=${jsx.fragment}`,
               env?.NODE_ENV !== "production" && `--jsx-dev`,
-              entryNaming && entryNaming !== "[name].[ext]" && `--entry-names=${entryNaming.replace(/\.\[ext]$/, "")}`,
+              entryNaming &&
+                entryNaming !== "[dir]/[name].[ext]" &&
+                `--entry-names=${entryNaming.replace(/\.\[ext]$/, "")}`,
               chunkNaming &&
                 chunkNaming !== "[name]-[hash].[ext]" &&
                 `--chunk-names=${chunkNaming.replace(/\.\[ext]$/, "")}`,
@@ -520,12 +599,12 @@ function expectBundled(
                 assetNaming !== "[name]-[hash].[ext]" &&
                 `--asset-names=${assetNaming.replace(/\.\[ext]$/, "")}`,
               metafile && `--metafile=${metafile}`,
-              sourceMap && `--sourcemap${sourceMap !== true ? `=${sourceMap}` : ""}`,
+              sourceMap && `--sourcemap=${sourceMap}`,
               banner && `--banner:js=${banner}`,
               legalComments && `--legal-comments=${legalComments}`,
               splitting && `--splitting`,
               treeShaking && `--tree-shaking`,
-              outbase && `--outbase=${path.join(root, outbase)}`,
+              outbase && `--outbase=${outbase}`,
               keepNames && `--keep-names`,
               mainFields && `--main-fields=${mainFields.join(",")}`,
               loader && Object.entries(loader).map(([k, v]) => `--loader:${k}=${v}`),
@@ -555,6 +634,22 @@ function expectBundled(
             {
               "version": "0.2.0",
               "configurations": [
+                ...(compile
+                  ? [
+                      {
+                        "type": "lldb",
+                        "request": "launch",
+                        "name": "run compiled exe",
+                        "program": outfile,
+                        "args": [],
+                        "cwd": root,
+                        "env": {
+                          "FORCE_COLOR": "1",
+                        },
+                        "console": "internalConsole",
+                      },
+                    ]
+                  : []),
                 {
                   "type": "lldb",
                   "request": "launch",
@@ -582,7 +677,6 @@ function expectBundled(
           delete bundlerEnv[key];
         }
       }
-
       const { stdout, stderr, success, exitCode } = Bun.spawnSync({
         cmd,
         cwd: root,
@@ -591,27 +685,30 @@ function expectBundled(
       });
 
       // Check for errors
-      const expectedErrors = bundleErrors
-        ? Object.entries(bundleErrors).flatMap(([file, v]) => v.map(error => ({ file, error })))
-        : null;
-
       if (!success) {
         if (!ESBUILD) {
           const errorText = stderr.toString("utf-8");
           const errorRegex = /^error: (.*?)\n(?:.*?\n\s*\^\s*\n(.*?)\n)?/gms;
-          const allErrors = [...errorText.matchAll(errorRegex)]
-            .map(([_str1, error, source]) => {
-              if (!source) {
-                if (error === "FileNotFound") {
-                  return null;
-                }
-                return { error, file: "<bun>" };
-              }
-              const [_str2, fullFilename, line, col] = source.match(/bun-build-tests\/(.*):(\d+):(\d+)/)!;
-              const file = fullFilename.slice(id.length + path.basename(outBase).length + 1);
-              return { error, file, line, col };
-            })
-            .filter(Boolean) as any[];
+          var skip = false;
+          if (errorText.includes("----- bun meta -----")) {
+            skip = true;
+          }
+          const allErrors = skip
+            ? []
+            : ([...errorText.matchAll(errorRegex)]
+                .map(([_str1, error, source]) => {
+                  if (!source) {
+                    if (error === "FileNotFound") {
+                      return null;
+                    }
+                    return { error, file: "<bun>" };
+                  }
+                  const [_str2, fullFilename, line, col] = source?.match?.(/bun-build-tests\/(.*):(\d+):(\d+)/) ?? [];
+                  const file = fullFilename?.slice?.(id.length + path.basename(outBase).length + 1);
+
+                  return { error, file, line, col };
+                })
+                .filter(Boolean) as any[]);
 
           if (allErrors.length === 0) {
             console.log(errorText);
@@ -680,11 +777,6 @@ function expectBundled(
         return testRef(id, opts);
       } else if (expectedErrors) {
         throw new Error("Errors were expected while bundling:\n" + expectedErrors.map(formatError).join("\n"));
-      }
-
-      if (mode === "transform" && !ESBUILD) {
-        mkdirSync(path.dirname(outfile!), { recursive: true });
-        Bun.write(outfile!, stdout);
       }
 
       // Check for warnings
@@ -766,7 +858,7 @@ function expectBundled(
           plugins: pluginArray,
           treeShaking,
           outdir: buildOutDir,
-          sourcemap: sourceMap === true ? "external" : sourceMap || "none",
+          sourcemap: sourceMap,
           splitting,
           target,
           publicPath,
@@ -784,7 +876,7 @@ const build = await Bun.build(options);
 if (build.logs) {
   throw build.logs;
 }
-for (const blob of build.outputs) {
+for (const [key, blob] of build.outputs) {
   await Bun.write(path.join(options.outdir, blob.path), blob.result);
 }
 `;
@@ -795,14 +887,94 @@ for (const blob of build.outputs) {
           }
         }
 
+        configRef = buildConfig;
         const build = await Bun.build(buildConfig);
+        configRef = null!;
         Bun.gc(true);
 
-        console.log(build);
+        const buildLogs = build.logs.filter(x => x.level === "error");
 
-        if (build.logs) {
-          console.log(build.logs);
-          throw new Error("TODO: handle build logs, but we should make this api nicer");
+        if (buildLogs.length) {
+          const allErrors: ErrorMeta[] = [];
+          for (const error of buildLogs) {
+            const str = error.message ?? String(error);
+            if (str.startsWith("\u001B[2mexpect(") || str.startsWith("expect(")) {
+              throw error;
+            }
+
+            // undocuemnted types
+            const position = error.position as {
+              lineText: string;
+              file: string;
+              namespace: string;
+              line: number;
+              column: number;
+              offset: number;
+            };
+
+            const filename = position?.file
+              ? position.namespace === "file"
+                ? "/" + path.relative(root, position.file)
+                : `${position.namespace}:${position.file.replace(root, "")}`
+              : "<bun>";
+
+            allErrors.push({
+              file: filename,
+              error: str,
+              col: position?.column !== undefined ? String(position.column) : undefined,
+              line: position?.line !== undefined ? String(position.line) : undefined,
+            });
+          }
+
+          if (DEBUG && allErrors.length) {
+            console.log("REFERENCE ERRORS OBJECT");
+            console.log("bundleErrors: {");
+            const files: any = {};
+            for (const err of allErrors) {
+              files[err.file] ??= [];
+              files[err.file].push(err);
+            }
+            for (const [file, errs] of Object.entries(files)) {
+              console.log('  "' + file + '": [');
+              for (const err of errs as any) {
+                console.log("    `" + err.error + "`,");
+              }
+              console.log("  ],");
+            }
+            console.log("},");
+          }
+
+          if (expectedErrors) {
+            const errorsLeft = [...expectedErrors];
+            let unexpectedErrors = [];
+
+            for (const error of allErrors) {
+              const i = errorsLeft.findIndex(item => error.file === item.file && error.error.includes(item.error));
+              if (i === -1) {
+                unexpectedErrors.push(error);
+              } else {
+                errorsLeft.splice(i, 1);
+              }
+            }
+
+            if (unexpectedErrors.length) {
+              throw new Error(
+                "Unexpected errors reported while bundling:\n" +
+                  [...unexpectedErrors].map(formatError).join("\n") +
+                  "\n\nExpected errors:\n" +
+                  expectedErrors.map(formatError).join("\n"),
+              );
+            }
+
+            if (errorsLeft.length) {
+              throw new Error("Errors were expected while bundling:\n" + errorsLeft.map(formatError).join("\n"));
+            }
+
+            return testRef(id, opts);
+          }
+          throw new Error("Bundle Failed\n" + [...allErrors].map(formatError).join("\n"));
+        } else if (expectedErrors && expectedErrors.length > 0) {
+          throw new Error("Errors were expected while bundling:\n" + expectedErrors.map(formatError).join("\n"));
         }
       } else {
         await esbuild.build({
@@ -860,125 +1032,127 @@ for (const blob of build.outputs) {
     }
 
     // Check that the bundle failed with status code 0 by verifying all files exist.
-    // TODO: clean up this entire bit into one main loop
-    if (outfile) {
-      if (!existsSync(outfile)) {
-        throw new Error("Bundle was not written to disk: " + outfile);
-      } else {
-        const content = readFileSync(outfile).toString();
-        if (dce) {
-          const dceFails = [...content.matchAll(/FAIL|FAILED|DROP|REMOVE/gi)];
-          if (dceFails.length) {
-            throw new Error("DCE test did not remove all expected code in " + outfile + ".");
-          }
-          if (dceKeepMarkerCount !== false) {
-            const keepMarkersThisFile = [...content.matchAll(/KEEP/gi)].length;
-            keepMarkersFound += keepMarkersThisFile;
-            if (
-              (typeof dceKeepMarkerCount === "number"
-                ? dceKeepMarkerCount
-                : Object.values(keepMarkers).reduce((a, b) => a + b, 0)) !== keepMarkersThisFile
-            ) {
-              throw new Error(
-                "DCE keep markers were not preserved in " +
-                  outfile +
-                  ". Expected " +
-                  keepMarkers[outfile] +
-                  " but found " +
-                  keepMarkersThisFile +
-                  ".",
-              );
+    // TODO: clean up this entire bit into one main loop\
+    if (!compile) {
+      if (outfile) {
+        if (!existsSync(outfile)) {
+          throw new Error("Bundle was not written to disk: " + outfile);
+        } else {
+          if (dce) {
+            const content = readFileSync(outfile).toString();
+            const dceFails = [...content.matchAll(/FAIL|FAILED|DROP|REMOVE/gi)];
+            if (dceFails.length) {
+              throw new Error("DCE test did not remove all expected code in " + outfile + ".");
             }
-          }
-        }
-        if (!ESBUILD) {
-          // expect(readFileSync(outfile).toString()).toMatchSnapshot(outfile.slice(root.length));
-        }
-      }
-    } else {
-      // entryNames makes it so we cannot predict the output file
-      if (!entryNaming || entryNaming === "[name].[ext]") {
-        for (const fullpath of outputPaths) {
-          if (!existsSync(fullpath)) {
-            throw new Error("Bundle was not written to disk: " + fullpath);
-          } else {
-            if (!ESBUILD) {
-              // expect(readFileSync(fullpath).toString()).toMatchSnapshot(fullpath.slice(root.length));
-            }
-            if (dce) {
-              const content = readFileSync(fullpath, "utf8");
-              const dceFails = [...content.matchAll(/FAIL|FAILED|DROP|REMOVE/gi)];
-              const key = fullpath.slice(root.length);
-              if (dceFails.length) {
-                throw new Error("DCE test did not remove all expected code in " + key + ".");
+            if (dceKeepMarkerCount !== false) {
+              const keepMarkersThisFile = [...content.matchAll(/KEEP/gi)].length;
+              keepMarkersFound += keepMarkersThisFile;
+              if (
+                (typeof dceKeepMarkerCount === "number"
+                  ? dceKeepMarkerCount
+                  : Object.values(keepMarkers).reduce((a, b) => a + b, 0)) !== keepMarkersThisFile
+              ) {
+                throw new Error(
+                  "DCE keep markers were not preserved in " +
+                    outfile +
+                    ". Expected " +
+                    keepMarkers[outfile] +
+                    " but found " +
+                    keepMarkersThisFile +
+                    ".",
+                );
               }
-              if (dceKeepMarkerCount !== false) {
-                const keepMarkersThisFile = [...content.matchAll(/KEEP/gi)].length;
-                keepMarkersFound += keepMarkersThisFile;
-                if (keepMarkers[key] !== keepMarkersThisFile) {
-                  throw new Error(
-                    "DCE keep markers were not preserved in " +
-                      key +
-                      ". Expected " +
-                      keepMarkers[key] +
-                      " but found " +
-                      keepMarkersThisFile +
-                      ".",
-                  );
+            }
+          }
+          if (!ESBUILD) {
+            // expect(readFileSync(outfile).toString()).toMatchSnapshot(outfile.slice(root.length));
+          }
+        }
+      } else {
+        // entryNames makes it so we cannot predict the output file
+        if (!entryNaming || entryNaming === "[dir]/[name].[ext]") {
+          for (const fullpath of outputPaths) {
+            if (!existsSync(fullpath)) {
+              throw new Error("Bundle was not written to disk: " + fullpath);
+            } else {
+              if (!ESBUILD) {
+                // expect(readFileSync(fullpath).toString()).toMatchSnapshot(fullpath.slice(root.length));
+              }
+              if (dce) {
+                const content = readFileSync(fullpath, "utf8");
+                const dceFails = [...content.replace(/\/\*.*?\*\//g, "").matchAll(/FAIL|FAILED|DROP|REMOVE/gi)];
+                const key = fullpath.slice(root.length);
+                if (dceFails.length) {
+                  throw new Error("DCE test did not remove all expected code in " + key + ".");
+                }
+                if (dceKeepMarkerCount !== false) {
+                  const keepMarkersThisFile = [...content.matchAll(/KEEP/gi)].length;
+                  keepMarkersFound += keepMarkersThisFile;
+                  if (keepMarkers[key] !== keepMarkersThisFile) {
+                    throw new Error(
+                      "DCE keep markers were not preserved in " +
+                        key +
+                        ". Expected " +
+                        keepMarkers[key] +
+                        " but found " +
+                        keepMarkersThisFile +
+                        ".",
+                    );
+                  }
                 }
               }
             }
           }
+        } else if (!ESBUILD) {
+          // TODO: snapshot these test cases
         }
-      } else if (!ESBUILD) {
-        // TODO: snapshot these test cases
       }
-    }
-    if (
-      dce &&
-      dceKeepMarkerCount !== false &&
-      typeof dceKeepMarkerCount === "number" &&
-      keepMarkersFound !== dceKeepMarkerCount
-    ) {
-      throw new Error(
-        `DCE keep markers were not preserved. Expected ${dceKeepMarkerCount} KEEP markers, but found ${keepMarkersFound}.`,
-      );
-    }
+      if (
+        dce &&
+        dceKeepMarkerCount !== false &&
+        typeof dceKeepMarkerCount === "number" &&
+        keepMarkersFound !== dceKeepMarkerCount
+      ) {
+        throw new Error(
+          `DCE keep markers were not preserved. Expected ${dceKeepMarkerCount} KEEP markers, but found ${keepMarkersFound}.`,
+        );
+      }
 
-    if (assertNotPresent) {
-      for (const [key, value] of Object.entries(assertNotPresent)) {
-        const filepath = path.join(root, key);
-        if (existsSync(filepath)) {
-          const strings = Array.isArray(value) ? value : [value];
-          for (const str of strings) {
-            if (api.readFile(key).includes(str)) throw new Error(`Expected ${key} to not contain "${str}"`);
+      if (assertNotPresent) {
+        for (const [key, value] of Object.entries(assertNotPresent)) {
+          const filepath = path.join(root, key);
+          if (existsSync(filepath)) {
+            const strings = Array.isArray(value) ? value : [value];
+            for (const str of strings) {
+              if (api.readFile(key).includes(str)) throw new Error(`Expected ${key} to not contain "${str}"`);
+            }
           }
         }
       }
-    }
 
-    if (capture) {
-      const captures = api.captureFile(path.relative(root, outfile ?? outputPaths[0]));
-      expect(captures).toEqual(capture);
-    }
+      if (capture) {
+        const captures = api.captureFile(path.relative(root, outfile ?? outputPaths[0]));
+        expect(captures).toEqual(capture);
+      }
 
-    // cjs2esm checks
-    if (cjs2esm) {
-      const outfiletext = api.readFile(path.relative(root, outfile ?? outputPaths[0]));
-      const regex = /\/\/\s+(.+?)\nvar\s+([a-zA-Z0-9_$]+)\s+=\s+__commonJS/g;
-      const matches = [...outfiletext.matchAll(regex)].map(match => "/" + match[1]);
-      const expectedMatches = cjs2esm === true ? [] : cjs2esm.unhandled ?? [];
-      try {
-        expect(matches).toEqual(expectedMatches);
-      } catch (error) {
-        if (matches.length === expectedMatches.length) {
-          console.error(`cjs2esm check failed.`);
-        } else {
-          console.error(
-            `cjs2esm check failed. expected ${expectedMatches.length} __commonJS helpers but found ${matches.length}.`,
-          );
+      // cjs2esm checks
+      if (cjs2esm) {
+        const outfiletext = api.readFile(path.relative(root, outfile ?? outputPaths[0]));
+        const regex = /\/\/\s+(.+?)\nvar\s+([a-zA-Z0-9_$]+)\s+=\s+__commonJS/g;
+        const matches = [...outfiletext.matchAll(regex)].map(match => "/" + match[1]);
+        const expectedMatches = cjs2esm === true ? [] : cjs2esm.unhandled ?? [];
+        try {
+          expect(matches.sort()).toEqual(expectedMatches.sort());
+        } catch (error) {
+          if (matches.length === expectedMatches.length) {
+            console.error(`cjs2esm check failed.`);
+          } else {
+            console.error(
+              `cjs2esm check failed. expected ${expectedMatches.length} __commonJS helpers but found ${matches.length}.`,
+            );
+          }
+          throw error;
         }
-        throw error;
       }
     }
 
@@ -1035,7 +1209,7 @@ for (const blob of build.outputs) {
 
         const { success, stdout, stderr } = Bun.spawnSync({
           cmd: [
-            (run.runtime ?? "bun") === "bun" ? bunExe() : "node",
+            ...(compile ? [] : [(run.runtime ?? "bun") === "bun" ? bunExe() : "node"]),
             ...(run.bunArgs ?? []),
             file,
             ...(run.args ?? []),
@@ -1148,12 +1322,12 @@ export function itBundled(
 ): BundlerTestRef {
   if (typeof opts === "function") {
     const fn = opts;
-    opts = opts({ root: path.join(outBase, id.replaceAll("/", path.sep)) });
+    opts = opts({ root: path.join(outBase, id.replaceAll("/", path.sep)), getConfigRef });
     // @ts-expect-error
     opts._referenceFn = fn;
   }
   const ref = testRef(id, opts);
-  const { it } = testForFile(callerSourceOrigin());
+  const { it, addNotImplemented } = testForFile(currentFile ?? callerSourceOrigin()) as any;
 
   if (FILTER && !filterMatches(id)) {
     return ref;
@@ -1166,19 +1340,11 @@ export function itBundled(
     }
   }
 
-  if (opts.notImplemented) {
+  if (opts.notImplemented && !FILTER) {
     if (!HIDE_SKIP) it.skip(id, () => {});
-    // commented out because expectBundled was made async and this is no longer possible in a sense.
-    // try {
-    //   expectBundled(id, opts);
-    //   it(id, () => {
-    //     throw new Error(
-    //       `Test ${id} passes but was marked as "notImplemented"\nPlease remove "notImplemented: true" from this test.`,
-    //     );
-    //   });
-    // } catch (error: any) {}
+    addNotImplemented({ id, options: opts });
   } else {
-    it(id, () => expectBundled(id, opts));
+    it(id, () => expectBundled(id, opts as any));
   }
   return ref;
 }
@@ -1186,13 +1352,13 @@ itBundled.skip = (id: string, opts: BundlerTestInput) => {
   if (FILTER && !filterMatches(id)) {
     return testRef(id, opts);
   }
-  const { it } = testForFile(callerSourceOrigin());
+  const { it } = testForFile(currentFile ?? callerSourceOrigin());
   if (!HIDE_SKIP) it.skip(id, () => expectBundled(id, opts));
   return testRef(id, opts);
 };
 
-function formatError(err: { file: string; error: string; line?: string; col?: string }) {
-  return `${err.file}${err.line ? " :" + err.line : ""}${err.col ? ":" + err.col : ""}: ${err.error}`;
+function formatError(err: ErrorMeta) {
+  return `${err.file}${err.line ? ":" + err.line : ""}${err.col ? ":" + err.col : ""}: ${err.error}`;
 }
 
 function filterMatches(id: string) {

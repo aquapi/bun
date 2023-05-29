@@ -95,10 +95,8 @@ pub const GlobalClasses = [_]type{
     Bun.Class,
     WebCore.Crypto.Class,
     EventListenerMixin.addEventListener(VirtualMachine),
-    BuildError.Class,
-    ResolveError.Class,
 
-    Fetch.Class,
+    // Fetch.Class,
     js_ast.Macro.JSNode.BunJSXCallbackFunction,
 
     WebCore.Crypto.Prototype,
@@ -112,6 +110,8 @@ const Task = JSC.Task;
 const Blob = @import("../blob.zig");
 pub const Buffer = MarkedArrayBuffer;
 const Lock = @import("../lock.zig").Lock;
+const BuildMessage = JSC.BuildMessage;
+const ResolveMessage = JSC.ResolveMessage;
 
 pub const OpaqueCallback = *const fn (current: ?*anyopaque) callconv(.C) void;
 pub fn OpaqueWrap(comptime Context: type, comptime Function: fn (this: *Context) void) OpaqueCallback {
@@ -361,6 +361,7 @@ pub const VirtualMachine = struct {
     pending_unref_counter: i32 = 0,
     preload: []const string = &[_][]const u8{},
     unhandled_pending_rejection_to_capture: ?*JSC.JSValue = null,
+    standalone_module_graph: ?*bun.StandaloneModuleGraph = null,
 
     hot_reload: bun.CLI.Command.HotReload = .none,
 
@@ -395,6 +396,9 @@ pub const VirtualMachine = struct {
     has_any_macro_remappings: bool = false,
     is_from_devserver: bool = false,
     has_enabled_macro_mode: bool = false,
+
+    /// Used by bun:test to set global hooks for beforeAll, beforeEach, etc.
+    is_in_preload: bool = false,
 
     /// The arguments used to launch the process _after_ the script name and bun and any flags applied to Bun
     ///     "bun run foo --bar"
@@ -723,12 +727,99 @@ pub const VirtualMachine = struct {
         return VMHolder.vm != null;
     }
 
+    pub fn initWithModuleGraph(
+        allocator: std.mem.Allocator,
+        log: *logger.Log,
+        graph: *bun.StandaloneModuleGraph,
+    ) !*VirtualMachine {
+        VMHolder.vm = try allocator.create(VirtualMachine);
+        var console = try allocator.create(ZigConsoleClient);
+        console.* = ZigConsoleClient.init(Output.errorWriter(), Output.writer());
+        const bundler = try Bundler.init(
+            allocator,
+            log,
+            std.mem.zeroes(Api.TransformOptions),
+            null,
+            null,
+        );
+        var vm = VMHolder.vm.?;
+
+        vm.* = VirtualMachine{
+            .global = undefined,
+            .allocator = allocator,
+            .entry_point = ServerEntryPoint{},
+            .event_listeners = EventListenerMixin.Map.init(allocator),
+            .bundler = bundler,
+            .console = console,
+            .node_modules = bundler.options.node_modules_bundle,
+            .log = log,
+            .flush_list = std.ArrayList(string).init(allocator),
+            .blobs = null,
+            .origin = bundler.options.origin,
+            .saved_source_map_table = SavedSourceMap.HashTable.init(allocator),
+            .source_mappings = undefined,
+            .macros = MacroMap.init(allocator),
+            .macro_entry_points = @TypeOf(vm.macro_entry_points).init(allocator),
+            .origin_timer = std.time.Timer.start() catch @panic("Please don't mess with timers."),
+            .origin_timestamp = getOriginTimestamp(),
+            .ref_strings = JSC.RefString.Map.init(allocator),
+            .file_blobs = JSC.WebCore.Blob.Store.Map.init(allocator),
+            .standalone_module_graph = graph,
+        };
+        vm.source_mappings = .{ .map = &vm.saved_source_map_table };
+        vm.regular_event_loop.tasks = EventLoop.Queue.init(
+            default_allocator,
+        );
+        vm.regular_event_loop.tasks.ensureUnusedCapacity(64) catch unreachable;
+        vm.regular_event_loop.concurrent_tasks = .{};
+        vm.event_loop = &vm.regular_event_loop;
+
+        vm.bundler.macro_context = null;
+        vm.bundler.resolver.store_fd = false;
+
+        vm.bundler.resolver.onWakePackageManager = .{
+            .context = &vm.modules,
+            .handler = ModuleLoader.AsyncModule.Queue.onWakeHandler,
+            .onDependencyError = JSC.ModuleLoader.AsyncModule.Queue.onDependencyError,
+        };
+
+        vm.bundler.resolver.standalone_module_graph = graph;
+
+        // Avoid reading from tsconfig.json & package.json when we're in standalone mode
+        vm.bundler.configureLinkerWithAutoJSX(false);
+        try vm.bundler.configureFramework(false);
+
+        vm.bundler.macro_context = js_ast.Macro.MacroContext.init(&vm.bundler);
+
+        var global_classes: [GlobalClasses.len]js.JSClassRef = undefined;
+        inline for (GlobalClasses, 0..) |Class, i| {
+            global_classes[i] = Class.get().*;
+        }
+        vm.global = ZigGlobalObject.create(
+            &global_classes,
+            @intCast(i32, global_classes.len),
+            vm.console,
+        );
+        vm.regular_event_loop.global = vm.global;
+        vm.regular_event_loop.virtual_machine = vm;
+
+        if (source_code_printer == null) {
+            var writer = try js_printer.BufferWriter.init(allocator);
+            source_code_printer = allocator.create(js_printer.BufferPrinter) catch unreachable;
+            source_code_printer.?.* = js_printer.BufferPrinter.init(writer);
+            source_code_printer.?.ctx.append_null_byte = false;
+        }
+
+        return vm;
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         _args: Api.TransformOptions,
         existing_bundle: ?*NodeModuleBundle,
         _log: ?*logger.Log,
         env_loader: ?*DotEnv.Loader,
+        store_fd: bool,
     ) !*VirtualMachine {
         var log: *logger.Log = undefined;
         if (_log) |__log| {
@@ -748,7 +839,6 @@ pub const VirtualMachine = struct {
             existing_bundle,
             env_loader,
         );
-
         var vm = VMHolder.vm.?;
 
         vm.* = VirtualMachine{
@@ -781,6 +871,7 @@ pub const VirtualMachine = struct {
         vm.event_loop = &vm.regular_event_loop;
 
         vm.bundler.macro_context = null;
+        vm.bundler.resolver.store_fd = store_fd;
 
         vm.bundler.resolver.onWakePackageManager = .{
             .context = &vm.modules,
@@ -1195,6 +1286,7 @@ pub const VirtualMachine = struct {
             res.* = ErrorableZigString.ok(ZigString.init(hardcoded.path));
             return;
         }
+
         var old_log = jsc_vm.log;
         var log = logger.Log.init(jsc_vm.allocator);
         defer log.deinit();
@@ -1218,7 +1310,7 @@ pub const VirtualMachine = struct {
                     }
                 }
 
-                const printed = ResolveError.fmt(
+                const printed = ResolveMessage.fmt(
                     jsc_vm.allocator,
                     specifier.slice(),
                     source.slice(),
@@ -1238,7 +1330,7 @@ pub const VirtualMachine = struct {
             };
 
             {
-                res.* = ErrorableZigString.err(err, @ptrCast(*anyopaque, ResolveError.create(global, VirtualMachine.get().allocator, msg, source.slice())));
+                res.* = ErrorableZigString.err(err, ResolveMessage.create(global, VirtualMachine.get().allocator, msg, source.slice()).asVoid());
             }
 
             return;
@@ -1348,7 +1440,7 @@ pub const VirtualMachine = struct {
                     };
                 };
                 {
-                    ret.* = ErrorableResolvedSource.err(err, @ptrCast(*anyopaque, BuildError.create(globalThis, globalThis.allocator(), msg)));
+                    ret.* = ErrorableResolvedSource.err(err, BuildMessage.create(globalThis, globalThis.allocator(), msg).asVoid());
                 }
                 return;
             },
@@ -1356,13 +1448,13 @@ pub const VirtualMachine = struct {
             1 => {
                 const msg = log.msgs.items[0];
                 ret.* = ErrorableResolvedSource.err(err, switch (msg.metadata) {
-                    .build => BuildError.create(globalThis, globalThis.allocator(), msg).?,
-                    .resolve => ResolveError.create(
+                    .build => BuildMessage.create(globalThis, globalThis.allocator(), msg).asVoid(),
+                    .resolve => ResolveMessage.create(
                         globalThis,
                         globalThis.allocator(),
                         msg,
                         referrer.slice(),
-                    ).?,
+                    ).asVoid(),
                 });
                 return;
             },
@@ -1373,13 +1465,13 @@ pub const VirtualMachine = struct {
 
                 for (log.msgs.items, 0..) |msg, i| {
                     errors[i] = switch (msg.metadata) {
-                        .build => BuildError.create(globalThis, globalThis.allocator(), msg).?,
-                        .resolve => ResolveError.create(
+                        .build => BuildMessage.create(globalThis, globalThis.allocator(), msg).asVoid(),
+                        .resolve => ResolveMessage.create(
                             globalThis,
                             globalThis.allocator(),
                             msg,
                             referrer.slice(),
-                        ).?,
+                        ).asVoid(),
                     };
                 }
 
@@ -1483,67 +1575,74 @@ pub const VirtualMachine = struct {
                     return promise;
             }
 
-            for (this.preload) |preload| {
-                var result = switch (this.bundler.resolver.resolveAndAutoInstall(
-                    this.bundler.fs.top_level_dir,
-                    normalizeSource(preload),
-                    .stmt,
-                    .read_only,
-                )) {
-                    .success => |r| r,
-                    .failure => |e| {
-                        this.log.addErrorFmt(
-                            null,
-                            logger.Loc.Empty,
-                            this.allocator,
-                            "{s} resolving preload {any}",
-                            .{
-                                @errorName(e),
-                                js_printer.formatJSONString(preload),
-                            },
-                        ) catch unreachable;
-                        return e;
-                    },
-                    .pending, .not_found => {
-                        this.log.addErrorFmt(
-                            null,
-                            logger.Loc.Empty,
-                            this.allocator,
-                            "preload not found {any}",
-                            .{
-                                js_printer.formatJSONString(preload),
-                            },
-                        ) catch unreachable;
-                        return error.ModuleNotFound;
-                    },
-                };
-                promise = JSModuleLoader.loadAndEvaluateModule(this.global, &ZigString.init(result.path().?.text));
-                this.pending_internal_promise = promise;
-
-                // pending_internal_promise can change if hot module reloading is enabled
-                if (this.bun_watcher != null) {
-                    this.eventLoop().performGC();
-                    switch (this.pending_internal_promise.status(this.global.vm())) {
-                        JSC.JSPromise.Status.Pending => {
-                            while (this.pending_internal_promise.status(this.global.vm()) == .Pending) {
-                                this.eventLoop().tick();
-
-                                if (this.pending_internal_promise.status(this.global.vm()) == .Pending) {
-                                    this.eventLoop().autoTick();
-                                }
-                            }
+            {
+                this.is_in_preload = true;
+                defer this.is_in_preload = false;
+                for (this.preload) |preload| {
+                    var result = switch (this.bundler.resolver.resolveAndAutoInstall(
+                        this.bundler.fs.top_level_dir,
+                        normalizeSource(preload),
+                        .stmt,
+                        .read_only,
+                    )) {
+                        .success => |r| r,
+                        .failure => |e| {
+                            this.log.addErrorFmt(
+                                null,
+                                logger.Loc.Empty,
+                                this.allocator,
+                                "{s} resolving preload {any}",
+                                .{
+                                    @errorName(e),
+                                    js_printer.formatJSONString(preload),
+                                },
+                            ) catch unreachable;
+                            return e;
                         },
-                        else => {},
-                    }
-                } else {
-                    this.eventLoop().performGC();
-                    this.waitForPromise(JSC.AnyPromise{
-                        .Internal = promise,
-                    });
-                }
+                        .pending, .not_found => {
+                            this.log.addErrorFmt(
+                                null,
+                                logger.Loc.Empty,
+                                this.allocator,
+                                "preload not found {any}",
+                                .{
+                                    js_printer.formatJSONString(preload),
+                                },
+                            ) catch unreachable;
+                            return error.ModuleNotFound;
+                        },
+                    };
+                    promise = JSModuleLoader.loadAndEvaluateModule(this.global, &ZigString.init(result.path().?.text));
 
-                if (promise.status(this.global.vm()) == .Rejected)
-                    return promise;
+                    this.pending_internal_promise = promise;
+                    JSValue.fromCell(promise).protect();
+                    defer JSValue.fromCell(promise).unprotect();
+
+                    // pending_internal_promise can change if hot module reloading is enabled
+                    if (this.bun_watcher != null) {
+                        this.eventLoop().performGC();
+                        switch (this.pending_internal_promise.status(this.global.vm())) {
+                            JSC.JSPromise.Status.Pending => {
+                                while (this.pending_internal_promise.status(this.global.vm()) == .Pending) {
+                                    this.eventLoop().tick();
+
+                                    if (this.pending_internal_promise.status(this.global.vm()) == .Pending) {
+                                        this.eventLoop().autoTick();
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                    } else {
+                        this.eventLoop().performGC();
+                        this.waitForPromise(JSC.AnyPromise{
+                            .Internal = promise,
+                        });
+                    }
+
+                    if (promise.status(this.global.vm()) == .Rejected)
+                        return promise;
+                }
             }
 
             // only load preloads once
@@ -1551,9 +1650,11 @@ pub const VirtualMachine = struct {
 
             promise = JSModuleLoader.loadAndEvaluateModule(this.global, ZigString.static(main_file_name));
             this.pending_internal_promise = promise;
+            JSC.JSValue.fromCell(promise).ensureStillAlive();
         } else {
             promise = JSModuleLoader.loadAndEvaluateModule(this.global, &ZigString.init(this.main));
             this.pending_internal_promise = promise;
+            JSC.JSValue.fromCell(promise).ensureStillAlive();
         }
 
         return promise;
@@ -1637,8 +1738,8 @@ pub const VirtualMachine = struct {
 
     // When the Error-like object is one of our own, it's best to rely on the object directly instead of serializing it to a ZigException.
     // This is for:
-    // - BuildError
-    // - ResolveError
+    // - BuildMessage
+    // - ResolveMessage
     // If there were multiple errors, it could be contained in an AggregateError.
     // In that case, this function becomes recursive.
     // In all other cases, we will convert it to a ZigException.
@@ -1703,21 +1804,8 @@ pub const VirtualMachine = struct {
             return;
         }
 
-        if (value.isObject()) {
-            if (js.JSObjectGetPrivate(value.asRef())) |priv| {
-                was_internal = this.printErrorFromMaybePrivateData(
-                    priv,
-                    exception_list,
-                    Writer,
-                    writer,
-                    allow_ansi_color,
-                );
-                return;
-            }
-        }
-
         was_internal = this.printErrorFromMaybePrivateData(
-            value.asRef(),
+            value,
             exception_list,
             Writer,
             writer,
@@ -1727,18 +1815,15 @@ pub const VirtualMachine = struct {
 
     pub fn printErrorFromMaybePrivateData(
         this: *VirtualMachine,
-        value: ?*anyopaque,
+        value: JSC.JSValue,
         exception_list: ?*ExceptionList,
         comptime Writer: type,
         writer: Writer,
         comptime allow_ansi_color: bool,
     ) bool {
-        const private_data_ptr = JSPrivateDataPtr.from(value);
-
-        switch (private_data_ptr.tag()) {
-            .BuildError => {
+        if (value.jsType() == .DOMWrapper) {
+            if (value.as(JSC.BuildMessage)) |build_error| {
                 defer Output.flush();
-                var build_error = private_data_ptr.as(BuildError);
                 if (!build_error.logged) {
                     build_error.msg.writeFormat(writer, allow_ansi_color) catch {};
                     writer.writeAll("\n") catch {};
@@ -1751,10 +1836,8 @@ pub const VirtualMachine = struct {
                     ) catch {};
                 }
                 return true;
-            },
-            .ResolveError => {
+            } else if (value.as(JSC.ResolveMessage)) |resolve_error| {
                 defer Output.flush();
-                var resolve_error = private_data_ptr.as(ResolveError);
                 if (!resolve_error.logged) {
                     resolve_error.msg.writeFormat(writer, allow_ansi_color) catch {};
                     resolve_error.logged = true;
@@ -1768,24 +1851,24 @@ pub const VirtualMachine = struct {
                     ) catch {};
                 }
                 return true;
-            },
-            else => {
-                this.printErrorInstance(
-                    @intToEnum(JSValue, @bitCast(JSValue.Type, (@ptrToInt(value)))),
-                    exception_list,
-                    Writer,
-                    writer,
-                    allow_ansi_color,
-                ) catch |err| {
-                    if (comptime Environment.isDebug) {
-                        // yo dawg
-                        Output.printErrorln("Error while printing Error-like object: {s}", .{@errorName(err)});
-                        Output.flush();
-                    }
-                };
-                return false;
-            },
+            }
         }
+
+        this.printErrorInstance(
+            value,
+            exception_list,
+            Writer,
+            writer,
+            allow_ansi_color,
+        ) catch |err| {
+            if (comptime Environment.isDebug) {
+                // yo dawg
+                Output.printErrorln("Error while printing Error-like object: {s}", .{@errorName(err)});
+                Output.flush();
+            }
+        };
+
+        return false;
     }
 
     pub fn reportUncaughtException(globalObject: *JSGlobalObject, exception: *JSC.Exception) JSValue {
@@ -2346,384 +2429,6 @@ pub const EventListenerMixin = struct {
             },
             .{},
         );
-    }
-};
-
-pub const ResolveError = struct {
-    msg: logger.Msg,
-    allocator: std.mem.Allocator,
-    referrer: ?Fs.Path = null,
-    logged: bool = false,
-
-    pub fn fmt(allocator: std.mem.Allocator, specifier: string, referrer: string, err: anyerror) !string {
-        switch (err) {
-            error.ModuleNotFound => {
-                if (Resolver.isPackagePath(specifier) and !strings.containsChar(specifier, '/')) {
-                    return try std.fmt.allocPrint(allocator, "Cannot find package \"{s}\" from \"{s}\"", .{ specifier, referrer });
-                } else {
-                    return try std.fmt.allocPrint(allocator, "Cannot find module \"{s}\" from \"{s}\"", .{ specifier, referrer });
-                }
-            },
-            else => {
-                if (Resolver.isPackagePath(specifier)) {
-                    return try std.fmt.allocPrint(allocator, "{s} while resolving package \"{s}\" from \"{s}\"", .{ @errorName(err), specifier, referrer });
-                } else {
-                    return try std.fmt.allocPrint(allocator, "{s} while resolving \"{s}\" from \"{s}\"", .{ @errorName(err), specifier, referrer });
-                }
-            },
-        }
-    }
-
-    pub fn toStringFn(this: *ResolveError, ctx: js.JSContextRef) js.JSValueRef {
-        var text = std.fmt.allocPrint(default_allocator, "ResolveError: {s}", .{this.msg.data.text}) catch return null;
-        var str = ZigString.init(text);
-        str.setOutputEncoding();
-        if (str.isUTF8()) {
-            const out = str.toValueGC(ctx.ptr());
-            default_allocator.free(text);
-            return out.asObjectRef();
-        }
-
-        return str.toExternalValue(ctx.ptr()).asObjectRef();
-    }
-
-    pub fn toString(
-        // this
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        // function
-        _: js.JSObjectRef,
-        // thisObject
-        _: js.JSObjectRef,
-        _: []const js.JSValueRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return this.toStringFn(ctx);
-    }
-
-    pub fn convertToType(ctx: js.JSContextRef, obj: js.JSObjectRef, kind: js.JSType, _: js.ExceptionRef) callconv(.C) js.JSValueRef {
-        switch (kind) {
-            js.JSType.kJSTypeString => {
-                if (js.JSObjectGetPrivate(obj)) |priv| {
-                    if (JSPrivateDataPtr.from(priv).is(ResolveError)) {
-                        var this = JSPrivateDataPtr.from(priv).as(ResolveError);
-                        return this.toStringFn(ctx);
-                    }
-                }
-            },
-            else => {},
-        }
-
-        return obj;
-    }
-
-    pub const Class = NewClass(
-        ResolveError,
-        .{
-            .name = "ResolveError",
-            .read_only = true,
-        },
-        .{
-            .toString = .{ .rfn = toString },
-            .convertToType = .{ .rfn = &convertToType },
-        },
-        .{
-            .referrer = .{
-                .get = getReferrer,
-                .ro = true,
-            },
-            .code = .{
-                .get = getCode,
-                .ro = true,
-            },
-            .message = .{
-                .get = getMessage,
-                .ro = true,
-            },
-            .name = .{
-                .get = getName,
-                .ro = true,
-            },
-            .specifier = .{
-                .get = getSpecifier,
-                .ro = true,
-            },
-            .importKind = .{
-                .get = getImportKind,
-                .ro = true,
-            },
-            .position = .{
-                .get = getPosition,
-                .ro = true,
-            },
-        },
-    );
-
-    pub fn create(
-        globalThis: *JSGlobalObject,
-        allocator: std.mem.Allocator,
-        msg: logger.Msg,
-        referrer: string,
-    ) js.JSObjectRef {
-        var resolve_error = allocator.create(ResolveError) catch unreachable;
-        resolve_error.* = ResolveError{
-            .msg = msg.clone(allocator) catch unreachable,
-            .allocator = allocator,
-            .referrer = Fs.Path.init(referrer),
-        };
-        var ref = Class.make(globalThis, resolve_error);
-        js.JSValueProtect(globalThis, ref);
-        return ref;
-    }
-
-    pub fn getCode(
-        _: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.static(comptime @as(string, @tagName(JSC.Node.ErrorCode.ERR_MODULE_NOT_FOUND))).toValue(ctx).asObjectRef();
-    }
-
-    pub fn getPosition(
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return BuildError.generatePositionObject(this.msg, ctx);
-    }
-
-    pub fn getMessage(
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.init(this.msg.data.text).toValueGC(ctx.ptr()).asRef();
-    }
-
-    pub fn getSpecifier(
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.init(this.msg.metadata.resolve.specifier.slice(this.msg.data.text)).toValueGC(ctx.ptr()).asRef();
-    }
-
-    pub fn getImportKind(
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.init(@tagName(this.msg.metadata.resolve.import_kind)).toValue(ctx.ptr()).asRef();
-    }
-
-    pub fn getReferrer(
-        this: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        if (this.referrer) |referrer| {
-            return ZigString.init(referrer.text).toValueGC(ctx.ptr()).asRef();
-        } else {
-            return js.JSValueMakeNull(ctx);
-        }
-    }
-
-    pub fn getName(
-        _: *ResolveError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.static("ResolveError").toValue(ctx.ptr()).asRef();
-    }
-
-    pub fn finalize(this: *ResolveError) void {
-        this.msg.deinit(bun.default_allocator);
-    }
-};
-
-pub const BuildError = struct {
-    msg: logger.Msg,
-    // resolve_result: Resolver.Result,
-    allocator: std.mem.Allocator,
-    logged: bool = false,
-
-    pub const Class = NewClass(
-        BuildError,
-        .{ .name = "BuildError", .read_only = true, .ts = .{
-            .class = .{
-                .name = "BuildError",
-            },
-        } },
-        .{
-            .convertToType = .{ .rfn = convertToType },
-            .toString = .{ .rfn = toString },
-        },
-        .{
-            .message = .{
-                .get = getMessage,
-                .ro = true,
-            },
-            .name = .{
-                .get = getName,
-                .ro = true,
-            },
-            // This is called "position" instead of "location" because "location" may be confused with Location.
-            .position = .{
-                .get = getPosition,
-                .ro = true,
-            },
-        },
-    );
-
-    pub fn toStringFn(this: *BuildError, ctx: js.JSContextRef) js.JSValueRef {
-        var text = std.fmt.allocPrint(default_allocator, "BuildError: {s}", .{this.msg.data.text}) catch return null;
-        var str = ZigString.init(text);
-        str.setOutputEncoding();
-        if (str.isUTF8()) {
-            const out = str.toValueGC(ctx.ptr());
-            default_allocator.free(text);
-            return out.asObjectRef();
-        }
-
-        return str.toExternalValue(ctx.ptr()).asObjectRef();
-    }
-
-    pub fn toString(
-        // this
-        this: *BuildError,
-        ctx: js.JSContextRef,
-        // function
-        _: js.JSObjectRef,
-        // thisObject
-        _: js.JSObjectRef,
-        _: []const js.JSValueRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return this.toStringFn(ctx);
-    }
-
-    pub fn convertToType(ctx: js.JSContextRef, obj: js.JSObjectRef, kind: js.JSType, _: js.ExceptionRef) callconv(.C) js.JSValueRef {
-        switch (kind) {
-            js.JSType.kJSTypeString => {
-                if (js.JSObjectGetPrivate(obj)) |priv| {
-                    if (JSPrivateDataPtr.from(priv).is(BuildError)) {
-                        var this = JSPrivateDataPtr.from(priv).as(BuildError);
-                        return this.toStringFn(ctx);
-                    }
-                }
-            },
-            else => {},
-        }
-
-        return obj;
-    }
-
-    pub fn create(
-        globalThis: *JSGlobalObject,
-        allocator: std.mem.Allocator,
-        msg: logger.Msg,
-        // resolve_result: *const Resolver.Result,
-    ) js.JSObjectRef {
-        var build_error = allocator.create(BuildError) catch unreachable;
-        build_error.* = BuildError{
-            .msg = msg.clone(allocator) catch unreachable,
-            // .resolve_result = resolve_result.*,
-            .allocator = allocator,
-        };
-
-        var ref = Class.make(globalThis, build_error);
-        js.JSValueProtect(globalThis, ref);
-        return ref;
-    }
-
-    pub fn getPosition(
-        this: *BuildError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return generatePositionObject(this.msg, ctx);
-    }
-
-    pub fn generatePositionObject(msg: logger.Msg, ctx: js.JSContextRef) js.JSValueRef {
-        if (msg.data.location) |location| {
-            var object = JSC.JSValue.createEmptyObject(ctx, 7);
-
-            object.put(
-                ctx,
-                ZigString.static("lineText"),
-                ZigString.init(location.line_text orelse "").toValueGC(ctx),
-            );
-            object.put(
-                ctx,
-                ZigString.static("file"),
-                ZigString.init(location.file).toValueGC(ctx),
-            );
-            object.put(
-                ctx,
-                ZigString.static("namespace"),
-                ZigString.init(location.namespace).toValueGC(ctx),
-            );
-            object.put(
-                ctx,
-                ZigString.static("line"),
-                JSValue.jsNumber(location.line),
-            );
-            object.put(
-                ctx,
-                ZigString.static("column"),
-                JSValue.jsNumber(location.column),
-            );
-            object.put(
-                ctx,
-                ZigString.static("length"),
-                JSValue.jsNumber(location.length),
-            );
-            object.put(
-                ctx,
-                ZigString.static("offset"),
-                JSValue.jsNumber(location.offset),
-            );
-            return object.asObjectRef();
-        }
-
-        return js.JSValueMakeNull(ctx);
-    }
-
-    pub fn getMessage(
-        this: *BuildError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.init(this.msg.data.text).toValue(ctx.ptr()).asRef();
-    }
-
-    const BuildErrorName = "BuildError";
-    pub fn getName(
-        _: *BuildError,
-        ctx: js.JSContextRef,
-        _: js.JSObjectRef,
-        _: js.JSStringRef,
-        _: js.ExceptionRef,
-    ) js.JSValueRef {
-        return ZigString.init(BuildErrorName).toValue(ctx.ptr()).asRef();
     }
 };
 

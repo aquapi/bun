@@ -63,7 +63,9 @@ pub const Kind = enum(i8) {
     }
 };
 
-pub const Loc = packed struct(i32) {
+// Do not mark these as packed
+// https://github.com/ziglang/zig/issues/15715
+pub const Loc = struct {
     start: i32 = -1,
 
     pub inline fn toNullable(loc: *Loc) ?Loc {
@@ -209,6 +211,19 @@ pub const Data = struct {
         }
 
         allocator.free(d.text);
+    }
+
+    pub fn cloneLineText(this: Data, should: bool, allocator: std.mem.Allocator) !Data {
+        if (!should or this.location == null or this.location.?.line_text == null)
+            return this;
+
+        var new_line_text = try allocator.dupe(u8, this.location.?.line_text.?);
+        var new_location = this.location.?;
+        new_location.line_text = new_line_text;
+        return Data{
+            .text = this.text,
+            .location = new_location,
+        };
     }
 
     pub fn clone(this: Data, allocator: std.mem.Allocator) !Data {
@@ -419,6 +434,13 @@ pub const Msg = struct {
         };
     }
 
+    pub fn toJS(this: Msg, globalObject: *bun.JSC.JSGlobalObject, allocator: std.mem.Allocator) JSC.JSValue {
+        return switch (this.metadata) {
+            .build => JSC.BuildMessage.create(globalObject, allocator, this),
+            .resolve => JSC.ResolveMessage.create(globalObject, allocator, this, ""),
+        };
+    }
+
     pub fn count(this: *const Msg, builder: *StringBuilder) void {
         this.data.count(builder);
         if (this.notes) |notes| {
@@ -566,7 +588,9 @@ pub const Msg = struct {
     }
 };
 
-pub const Range = packed struct {
+// Do not mark these as packed
+// https://github.com/ziglang/zig/issues/15715
+pub const Range = struct {
     loc: Loc = Loc.Empty,
     len: i32 = 0,
     pub const None = Range{ .loc = Loc.Empty, .len = 0 };
@@ -575,6 +599,10 @@ pub const Range = packed struct {
         if (this.loc.start < 0 or this.len <= 0) return "";
         const slice = buf[@intCast(usize, this.loc.start)..];
         return slice[0..@min(@intCast(usize, this.len), buf.len)];
+    }
+
+    pub fn contains(this: Range, k: i32) bool {
+        return k >= this.loc.start and k < this.loc.start + this.len;
     }
 
     pub fn isEmpty(r: *const Range) bool {
@@ -599,6 +627,8 @@ pub const Log = struct {
     errors: usize = 0,
     msgs: ArrayList(Msg),
     level: Level = if (Environment.isDebug) Level.info else Level.warn,
+
+    clone_line_text: bool = false,
 
     pub inline fn hasErrors(this: *const Log) bool {
         return this.errors > 0;
@@ -690,18 +720,17 @@ pub const Log = struct {
             0 => return JSC.JSValue.jsUndefined(),
             1 => {
                 const msg = msgs[0];
-                return JSC.JSValue.fromRef(JSC.BuildError.create(global, allocator, msg));
+                return switch (msg.metadata) {
+                    .build => JSC.BuildMessage.create(global, allocator, msg),
+                    .resolve => JSC.ResolveMessage.create(global, allocator, msg, ""),
+                };
             },
             else => {
                 for (msgs[0..count], 0..) |msg, i| {
-                    switch (msg.metadata) {
-                        .build => {
-                            errors_stack[i] = JSC.BuildError.create(global, allocator, msg).?;
-                        },
-                        .resolve => {
-                            errors_stack[i] = JSC.ResolveError.create(global, allocator, msg, "").?;
-                        },
-                    }
+                    errors_stack[i] = switch (msg.metadata) {
+                        .build => JSC.BuildMessage.create(global, allocator, msg).asVoid(),
+                        .resolve => JSC.ResolveMessage.create(global, allocator, msg, "").asVoid(),
+                    };
                 }
                 const out = JSC.ZigString.init(fmt);
                 const agg = global.createAggregateError(errors_stack[0..count].ptr, count, &out);
@@ -710,7 +739,21 @@ pub const Log = struct {
         }
     }
 
-    pub fn appendTo(self: *Log, other: *Log) !void {
+    pub fn toJSArray(this: Log, global: *JSC.JSGlobalObject, allocator: std.mem.Allocator) JSC.JSValue {
+        const msgs: []const Msg = this.msgs.items;
+        var errors_stack: [256]*anyopaque = undefined;
+
+        const count = @intCast(u16, @min(msgs.len, errors_stack.len));
+        var arr = JSC.JSValue.createEmptyArray(global, count);
+
+        for (msgs[0..count], 0..) |msg, i| {
+            arr.putIndex(global, @intCast(u32, i), msg.toJS(global, allocator));
+        }
+
+        return arr;
+    }
+
+    pub fn cloneTo(self: *Log, other: *Log) !void {
         var notes_count: usize = 0;
 
         for (self.msgs.items) |msg_| {
@@ -740,10 +783,14 @@ pub const Log = struct {
         try other.msgs.appendSlice(self.msgs.items);
         other.warnings += self.warnings;
         other.errors += self.errors;
-        self.msgs.deinit();
     }
 
-    pub fn appendToWithRecycled(self: *Log, other: *Log, recycled: bool) !void {
+    pub fn appendTo(self: *Log, other: *Log) !void {
+        try self.cloneTo(other);
+        self.msgs.clearAndFree();
+    }
+
+    pub fn cloneToWithRecycled(self: *Log, other: *Log, recycled: bool) !void {
         try other.msgs.appendSlice(self.msgs.items);
         other.warnings += self.warnings;
         other.errors += self.errors;
@@ -786,7 +833,10 @@ pub const Log = struct {
                 }
             }
         }
+    }
 
+    pub fn appendToWithRecycled(self: *Log, other: *Log, recycled: bool) !void {
+        try self.cloneToWithRecycled(other, recycled);
         self.msgs.clearAndFree();
     }
 
@@ -955,7 +1005,7 @@ pub const Log = struct {
         log.errors += 1;
         try log.addMsg(.{
             .kind = .err,
-            .data = rangeData(source, r, allocPrint(allocator, text, args) catch unreachable),
+            .data = try rangeData(source, r, allocPrint(allocator, text, args) catch unreachable).cloneLineText(log.clone_line_text, log.msgs.allocator),
         });
     }
 
@@ -964,7 +1014,7 @@ pub const Log = struct {
         log.errors += 1;
         try log.addMsg(.{
             .kind = .err,
-            .data = rangeData(source, r, allocPrint(allocator, text, args) catch unreachable),
+            .data = try rangeData(source, r, allocPrint(allocator, text, args) catch unreachable).cloneLineText(log.clone_line_text, log.msgs.allocator),
             .notes = notes,
         });
     }
@@ -974,7 +1024,7 @@ pub const Log = struct {
         log.errors += 1;
         try log.addMsg(.{
             .kind = .err,
-            .data = rangeData(source, Range{ .loc = l }, allocPrint(allocator, text, args) catch unreachable),
+            .data = try rangeData(source, Range{ .loc = l }, allocPrint(allocator, text, args) catch unreachable).cloneLineText(log.clone_line_text, log.msgs.allocator),
         });
     }
 
@@ -984,7 +1034,7 @@ pub const Log = struct {
         log.warnings += 1;
         try log.addMsg(.{
             .kind = .warn,
-            .data = rangeData(source, r, text),
+            .data = try rangeData(source, r, text).cloneLineText(log.clone_line_text, log.msgs.allocator),
         });
     }
 
@@ -994,7 +1044,7 @@ pub const Log = struct {
         log.warnings += 1;
         try log.addMsg(.{
             .kind = .warn,
-            .data = rangeData(source, Range{ .loc = l }, allocPrint(allocator, text, args) catch unreachable),
+            .data = try rangeData(source, Range{ .loc = l }, allocPrint(allocator, text, args) catch unreachable).cloneLineText(log.clone_line_text, log.msgs.allocator),
         });
     }
 
@@ -1004,7 +1054,7 @@ pub const Log = struct {
         log.warnings += 1;
         try log.addMsg(.{
             .kind = .warn,
-            .data = rangeData(source, r, allocPrint(allocator, text, args) catch unreachable),
+            .data = try rangeData(source, r, allocPrint(allocator, text, args) catch unreachable).cloneLineText(log.clone_line_text, log.msgs.allocator),
         });
     }
 
@@ -1103,6 +1153,24 @@ pub const Log = struct {
         @setCold(true);
         self.errors += 1;
         try self.addMsg(.{ .kind = .err, .data = rangeData(_source, Range{ .loc = loc }, text) });
+    }
+
+    pub fn addSymbolAlreadyDeclaredError(self: *Log, allocator: std.mem.Allocator, source: *const Source, name: string, new_loc: Loc, old_loc: Loc) !void {
+        var notes = try allocator.alloc(Data, 1);
+        notes[0] = rangeData(
+            source,
+            source.rangeOfIdentifier(old_loc),
+            try std.fmt.allocPrint(allocator, "\"{s}\" was originally declared here", .{name}),
+        );
+
+        try self.addRangeErrorFmtWithNotes(
+            source,
+            source.rangeOfIdentifier(new_loc),
+            allocator,
+            notes,
+            "\"{s}\" has already been declared",
+            .{name},
+        );
     }
 
     pub fn printForLogLevel(self: *Log, to: anytype) !void {

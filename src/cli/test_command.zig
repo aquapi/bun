@@ -52,6 +52,7 @@ fn fmtStatusTextLine(comptime status: @Type(.EnumLiteral), comptime emoji: bool)
             .pass => Output.prettyFmt("<r><green>✓<r>", emoji),
             .fail => Output.prettyFmt("<r><red>✗<r>", emoji),
             .skip => Output.prettyFmt("<r><yellow>-<d>", emoji),
+            .todo => Output.prettyFmt("<r><magenta>✎<r>", emoji),
             else => @compileError("Invalid status " ++ @tagName(status)),
         };
     }
@@ -74,11 +75,13 @@ pub const CommandLineReporter = struct {
 
     failures_to_repeat_buf: std.ArrayListUnmanaged(u8) = .{},
     skips_to_repeat_buf: std.ArrayListUnmanaged(u8) = .{},
+    todos_to_repeat_buf: std.ArrayListUnmanaged(u8) = .{},
 
     pub const Summary = struct {
         pass: u32 = 0,
         expectations: u32 = 0,
         skip: u32 = 0,
+        todo: u32 = 0,
         fail: u32 = 0,
     };
 
@@ -99,7 +102,7 @@ pub const CommandLineReporter = struct {
         // var this: *CommandLineReporter = @fieldParentPtr(CommandLineReporter, "callback", cb);
     }
 
-    fn printTestLine(label: string, parent: ?*jest.DescribeScope, comptime skip: bool, writer: anytype) void {
+    fn printTestLine(label: string, elapsed_ns: u64, parent: ?*jest.DescribeScope, comptime skip: bool, writer: anytype) void {
         var scopes_stack = std.BoundedArray(*jest.DescribeScope, 64).init(0) catch unreachable;
         var parent_ = parent;
 
@@ -144,10 +147,19 @@ pub const CommandLineReporter = struct {
         else
             writer.print(comptime Output.prettyFmt(" {s}", false), .{display_label}) catch unreachable;
 
+        if (elapsed_ns > (std.time.ns_per_us * 10)) {
+            writer.print(" {any}", .{
+                Output.ElapsedFormatter{
+                    .colors = Output.enable_ansi_colors_stderr,
+                    .duration_ns = elapsed_ns,
+                },
+            }) catch unreachable;
+        }
+
         writer.writeAll("\n") catch unreachable;
     }
 
-    pub fn handleTestPass(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, parent: ?*jest.DescribeScope) void {
+    pub fn handleTestPass(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, elapsed_ns: u64, parent: ?*jest.DescribeScope) void {
         var writer_: std.fs.File.Writer = Output.errorWriter();
         var buffered_writer = std.io.bufferedWriter(writer_);
         var writer = buffered_writer.writer();
@@ -157,14 +169,14 @@ pub const CommandLineReporter = struct {
 
         writeTestStatusLine(.pass, &writer);
 
-        printTestLine(label, parent, false, writer);
+        printTestLine(label, elapsed_ns, parent, false, writer);
 
         this.jest.tests.items(.status)[id] = TestRunner.Test.Status.pass;
         this.summary.pass += 1;
         this.summary.expectations += expectations;
     }
 
-    pub fn handleTestFail(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, parent: ?*jest.DescribeScope) void {
+    pub fn handleTestFail(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, elapsed_ns: u64, parent: ?*jest.DescribeScope) void {
         var writer_: std.fs.File.Writer = Output.errorWriter();
         var this: *CommandLineReporter = @fieldParentPtr(CommandLineReporter, "callback", cb);
 
@@ -174,7 +186,7 @@ pub const CommandLineReporter = struct {
         var writer = this.failures_to_repeat_buf.writer(bun.default_allocator);
 
         writeTestStatusLine(.fail, &writer);
-        printTestLine(label, parent, false, writer);
+        printTestLine(label, elapsed_ns, parent, false, writer);
 
         writer_.writeAll(this.failures_to_repeat_buf.items[initial_length..]) catch unreachable;
         Output.flush();
@@ -185,7 +197,7 @@ pub const CommandLineReporter = struct {
         this.jest.tests.items(.status)[id] = TestRunner.Test.Status.fail;
     }
 
-    pub fn handleTestSkip(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, parent: ?*jest.DescribeScope) void {
+    pub fn handleTestSkip(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, elapsed_ns: u64, parent: ?*jest.DescribeScope) void {
         var writer_: std.fs.File.Writer = Output.errorWriter();
         var this: *CommandLineReporter = @fieldParentPtr(CommandLineReporter, "callback", cb);
 
@@ -197,7 +209,7 @@ pub const CommandLineReporter = struct {
             var writer = this.skips_to_repeat_buf.writer(bun.default_allocator);
 
             writeTestStatusLine(.skip, &writer);
-            printTestLine(label, parent, true, writer);
+            printTestLine(label, elapsed_ns, parent, true, writer);
 
             writer_.writeAll(this.skips_to_repeat_buf.items[initial_length..]) catch unreachable;
             Output.flush();
@@ -207,6 +219,27 @@ pub const CommandLineReporter = struct {
         this.summary.skip += 1;
         this.summary.expectations += expectations;
         this.jest.tests.items(.status)[id] = TestRunner.Test.Status.skip;
+    }
+
+    pub fn handleTestTodo(cb: *TestRunner.Callback, id: Test.ID, _: string, label: string, expectations: u32, elapsed_ns: u64, parent: ?*jest.DescribeScope) void {
+        var writer_: std.fs.File.Writer = Output.errorWriter();
+        var this: *CommandLineReporter = @fieldParentPtr(CommandLineReporter, "callback", cb);
+
+        // when the tests skip, we want to repeat the failures at the end
+        // so that you can see them better when there are lots of tests that ran
+        const initial_length = this.todos_to_repeat_buf.items.len;
+        var writer = this.todos_to_repeat_buf.writer(bun.default_allocator);
+
+        writeTestStatusLine(.todo, &writer);
+        printTestLine(label, elapsed_ns, parent, true, writer);
+
+        writer_.writeAll(this.todos_to_repeat_buf.items[initial_length..]) catch unreachable;
+        Output.flush();
+
+        // this.updateDots();
+        this.summary.todo += 1;
+        this.summary.expectations += expectations;
+        this.jest.tests.items(.status)[id] = TestRunner.Test.Status.todo;
     }
 };
 
@@ -230,7 +263,7 @@ const Scanner = struct {
     };
 
     fn readDirWithName(this: *Scanner, name: string, handle: ?std.fs.Dir) !*FileSystem.RealFS.EntriesOption {
-        return try this.fs.fs.readDirectoryWithIterator(name, handle, *Scanner, this);
+        return try this.fs.fs.readDirectoryWithIterator(name, handle, 0, true, *Scanner, this);
     }
 
     pub fn scan(this: *Scanner, path_literal: string) void {
@@ -252,6 +285,7 @@ const Scanner = struct {
             if (@as(FileSystem.RealFS.EntriesOption.Tag, root.*) == .entries) {
                 var iter = root.entries.data.iterator();
                 const fd = root.entries.fd;
+                std.debug.assert(fd != 0);
                 while (iter.next()) |entry| {
                     this.next(entry.value_ptr.*, fd);
                 }
@@ -260,6 +294,8 @@ const Scanner = struct {
 
         while (this.dirs_to_scan.readItem()) |entry| {
             var dir = std.fs.Dir{ .fd = entry.relative_dir };
+            std.debug.assert(dir.fd != 0);
+
             var parts2 = &[_]string{ entry.dir_path, entry.name.slice() };
             var path2 = this.fs.absBuf(parts2, &this.open_dir_buf);
             this.open_dir_buf[path2.len] = 0;
@@ -306,7 +342,7 @@ const Scanner = struct {
     pub fn next(this: *Scanner, entry: *FileSystem.Entry, fd: bun.StoredFileDescriptorType) void {
         const name = entry.base_lowercase();
         this.has_iterated = true;
-        switch (entry.kind(&this.fs.fs)) {
+        switch (entry.kind(&this.fs.fs, true)) {
             .dir => {
                 if ((name.len > 0 and name[0] == '.') or strings.eqlComptime(name, "node_modules")) {
                     return;
@@ -346,6 +382,7 @@ const Scanner = struct {
 pub const TestCommand = struct {
     pub const name = "test";
     pub const old_name = "wiptest";
+
     pub fn exec(ctx: Command.Context) !void {
         if (comptime is_bindgen) unreachable;
         // print the version so you know its doing stuff if it takes a sec
@@ -377,6 +414,7 @@ pub const TestCommand = struct {
                 .allocator = ctx.allocator,
                 .log = ctx.log,
                 .callback = undefined,
+                .default_timeout_ms = ctx.test_options.default_timeout_ms,
                 .snapshots = Snapshots{
                     .allocator = ctx.allocator,
                     .update_snapshots = ctx.test_options.update_snapshots,
@@ -393,6 +431,7 @@ pub const TestCommand = struct {
             .onTestPass = CommandLineReporter.handleTestPass,
             .onTestFail = CommandLineReporter.handleTestFail,
             .onTestSkip = CommandLineReporter.handleTestSkip,
+            .onTestTodo = CommandLineReporter.handleTestTodo,
         };
         reporter.repeat_count = @max(ctx.test_options.repeat_count, 1);
         reporter.jest.callback = &reporter.callback;
@@ -400,16 +439,42 @@ pub const TestCommand = struct {
 
         js_ast.Expr.Data.Store.create(default_allocator);
         js_ast.Stmt.Data.Store.create(default_allocator);
-        var vm = try JSC.VirtualMachine.init(ctx.allocator, ctx.args, null, ctx.log, env_loader);
+        var vm = try JSC.VirtualMachine.init(
+            ctx.allocator,
+            ctx.args,
+            null,
+            ctx.log,
+            env_loader,
+            // we must store file descriptors because we reuse them for
+            // iterating through the directory tree recursively
+            //
+            // in the future we should investigate if refactoring this to not
+            // rely on the dir fd yields a performance improvement
+            true,
+        );
         vm.argv = ctx.passthrough;
         vm.preload = ctx.preloads;
+        vm.bundler.options.rewrite_jest_for_tests = true;
 
         try vm.bundler.configureDefines();
-        vm.bundler.options.rewrite_jest_for_tests = true;
 
         vm.loadExtraEnv();
         vm.is_main_thread = true;
         JSC.VirtualMachine.is_main_thread_vm = true;
+
+        // For tests, we default to UTC time zone
+        // unless the user inputs TZ="", in which case we use local time zone
+        var TZ_NAME: string =
+            // We use the string "Etc/UTC" instead of "UTC" so there is no normalization difference.
+            "Etc/UTC";
+
+        if (vm.bundler.env.get("TZ")) |tz| {
+            TZ_NAME = tz;
+        }
+
+        if (TZ_NAME.len > 0) {
+            _ = vm.global.setTimeZone(&JSC.ZigString.init(TZ_NAME));
+        }
 
         var scanner = Scanner{
             .dirs_to_scan = Scanner.Fifo.init(ctx.allocator),
@@ -449,8 +514,20 @@ pub const TestCommand = struct {
                 error_writer.writeAll(reporter.skips_to_repeat_buf.items) catch unreachable;
             }
 
-            if (reporter.summary.fail > 0) {
+            if (reporter.summary.todo > 0) {
                 if (reporter.summary.skip > 0) {
+                    Output.prettyError("\n", .{});
+                }
+
+                Output.prettyError("\n<r><d>{d} tests todo:<r>\n", .{reporter.summary.todo});
+                Output.flush();
+
+                var error_writer = Output.errorWriter();
+                error_writer.writeAll(reporter.todos_to_repeat_buf.items) catch unreachable;
+            }
+
+            if (reporter.summary.fail > 0) {
+                if (reporter.summary.skip > 0 or reporter.summary.todo > 0) {
                     Output.prettyError("\n", .{});
                 }
 
@@ -490,6 +567,10 @@ pub const TestCommand = struct {
 
             if (reporter.summary.skip > 0) {
                 Output.prettyError(" <r><yellow>{d:5>} skip<r>\n", .{reporter.summary.skip});
+            }
+
+            if (reporter.summary.todo > 0) {
+                Output.prettyError(" <r><magenta>{d:5>} todo<r>\n", .{reporter.summary.todo});
             }
 
             if (reporter.summary.fail > 0) {
@@ -543,10 +624,8 @@ pub const TestCommand = struct {
                 Output.prettyError(" {d:5>} expect() calls\n", .{reporter.summary.expectations});
             }
 
-            Output.prettyError("Ran {d} tests across {d} files ", .{
-                reporter.summary.fail + reporter.summary.pass,
-                test_files.len,
-            });
+            const total_tests = reporter.summary.fail + reporter.summary.pass + reporter.summary.skip + reporter.summary.todo;
+            Output.prettyError("Ran {d} tests across {d} files. <d>{d} total<r> ", .{ reporter.summary.fail + reporter.summary.pass, test_files.len, total_tests });
             Output.printStartEnd(ctx.start_time, std.time.nanoTimestamp());
         }
 
@@ -591,12 +670,12 @@ pub const TestCommand = struct {
 
                 if (files.len > 1) {
                     for (files[0 .. files.len - 1]) |file_name| {
-                        TestCommand.run(reporter, vm, file_name.slice(), allocator) catch {};
+                        TestCommand.run(reporter, vm, file_name.slice(), allocator, false) catch {};
                         Global.mimalloc_cleanup(false);
                     }
                 }
 
-                TestCommand.run(reporter, vm, files[files.len - 1].slice(), allocator) catch {};
+                TestCommand.run(reporter, vm, files[files.len - 1].slice(), allocator, true) catch {};
             }
         };
 
@@ -615,6 +694,7 @@ pub const TestCommand = struct {
         vm: *JSC.VirtualMachine,
         file_name: string,
         _: std.mem.Allocator,
+        is_last: bool,
     ) !void {
         defer {
             js_ast.Expr.Data.Store.reset();
@@ -669,12 +749,13 @@ pub const TestCommand = struct {
             }
 
             const file_end = reporter.jest.files.len;
+
             for (file_start..file_end) |module_id| {
                 const module = reporter.jest.files.items(.module_scope)[module_id];
 
                 vm.onUnhandledRejectionCtx = null;
                 vm.onUnhandledRejection = jest.TestRunnerTask.onUnhandledRejection;
-                module.runTests(JSC.JSValue.zero, vm.global);
+                module.runTests(vm.global);
                 vm.eventLoop().tick();
 
                 var prev_unhandled_count = vm.unhandled_error_counter;
@@ -693,7 +774,15 @@ pub const TestCommand = struct {
                         prev_unhandled_count = vm.unhandled_error_counter;
                     }
                 }
-                _ = vm.global.vm().runGC(false);
+                switch (vm.aggressive_garbage_collection) {
+                    .none => {},
+                    .mild => {
+                        _ = vm.global.vm().collectAsync();
+                    },
+                    .aggressive => {
+                        _ = vm.global.vm().runGC(false);
+                    },
+                }
             }
 
             vm.global.vm().clearMicrotaskCallback();
@@ -704,6 +793,14 @@ pub const TestCommand = struct {
                 vm.global.deleteModuleRegistryEntry(&entry);
                 Output.prettyErrorln("<r>{s} <d>[RUN {d:0>4}]:<r>\n", .{ resolution.path_pair.primary.name.filename, repeat_index + 1 });
                 Output.flush();
+            }
+        }
+
+        if (is_last) {
+            if (jest.Jest.runner != null) {
+                if (jest.DescribeScope.runGlobalCallbacks(vm.global, .afterAll)) |after| {
+                    vm.global.bunVM().runErrorHandler(after, null);
+                }
             }
         }
     }

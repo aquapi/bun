@@ -301,7 +301,7 @@ static const HashTableValue JSFetchHeadersPrototypeTableValues[] = {
     { "values"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsFetchHeadersPrototypeFunction_values, 0 } },
     { "forEach"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsFetchHeadersPrototypeFunction_forEach, 1 } },
     { "toJSON"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsFetchHeadersPrototypeFunction_toJSON, 0 } },
-    { "count"_s, static_cast<unsigned>(JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontDelete | JSC::PropertyAttribute::DontEnum), NoIntrinsic, { HashTableValue::GetterSetterType, jsFetchHeadersGetterCount, 0 } },
+    { "count"_s, static_cast<unsigned>(JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontDelete), NoIntrinsic, { HashTableValue::GetterSetterType, jsFetchHeadersGetterCount, 0 } },
     // { "getSetCookie"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsFetchHeadersPrototypeFunction_getSetCookie, 0 } },
 };
 
@@ -406,7 +406,7 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_toJSONBody(JSC
         for (auto it = vec.begin(); it != vec.end(); ++it) {
             auto& name = it->key;
             auto& value = it->value;
-            obj->putDirect(vm, Identifier::fromString(vm, String(WTF::httpHeaderNameStringImpl(name))), jsString(vm, value), 0);
+            obj->putDirect(vm, Identifier::fromString(vm, WTF::httpHeaderNameStringImpl(name)), jsString(vm, value), 0);
         }
     }
 

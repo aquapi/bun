@@ -36,6 +36,11 @@ The following Web APIs are partially or completely supported.
 
 ---
 
+- JSON
+- [`JSON`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON)
+
+---
+
 - Timeouts
 - [`setTimeout`](https://developer.mozilla.org/en-US/docs/Web/API/setTimeout) [`clearTimeout`](https://developer.mozilla.org/en-US/docs/Web/API/clearTimeout)
 
@@ -64,8 +69,7 @@ The following Web APIs are partially or completely supported.
 ---
 
 - Errors
-- [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/reportError) [`ResolveError`](https://developer.mozilla.org/en-US/docs/Web/API/ResolveError)
-  [`BuildError`](https://developer.mozilla.org/en-US/docs/Web/API/BuildError)
+- [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/reportError)
 
 ---
 

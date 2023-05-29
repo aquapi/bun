@@ -36,24 +36,43 @@ var estimated_input_lines_of_code_: usize = undefined;
 
 pub const BuildCommand = struct {
     pub fn exec(
-        ctx: Command.Context,
+        ctx_: Command.Context,
     ) !void {
         Global.configureAllocator(.{ .long_running = true });
+        var ctx = ctx_;
         var allocator = ctx.allocator;
         var log = ctx.log;
         estimated_input_lines_of_code_ = 0;
+        if (ctx.bundler_options.compile) {
+            // set this early so that externals are set up correctly and define is right
+            ctx.args.target = .bun;
+        }
 
         var this_bundler = try bundler.Bundler.init(allocator, log, ctx.args, null, null);
+
+        this_bundler.options.source_map = options.SourceMapOption.fromApi(ctx.args.source_map);
+        this_bundler.resolver.opts.source_map = options.SourceMapOption.fromApi(ctx.args.source_map);
+
+        this_bundler.options.compile = ctx.bundler_options.compile;
+        this_bundler.resolver.opts.compile = ctx.bundler_options.compile;
+
+        if (this_bundler.options.source_map == .external and ctx.bundler_options.outdir.len == 0 and !ctx.bundler_options.compile) {
+            Output.prettyErrorln("<r><red>error<r><d>:<r> cannot use an external source map without --outdir", .{});
+            Global.exit(1);
+            return;
+        }
+        var outfile = ctx.bundler_options.outfile;
+
         this_bundler.options.entry_naming = ctx.bundler_options.entry_naming;
         this_bundler.options.chunk_naming = ctx.bundler_options.chunk_naming;
         this_bundler.options.asset_naming = ctx.bundler_options.asset_naming;
         this_bundler.resolver.opts.entry_naming = ctx.bundler_options.entry_naming;
         this_bundler.resolver.opts.chunk_naming = ctx.bundler_options.chunk_naming;
         this_bundler.resolver.opts.asset_naming = ctx.bundler_options.asset_naming;
-        this_bundler.options.output_dir = ctx.bundler_options.outdir;
-        this_bundler.resolver.opts.output_dir = ctx.bundler_options.outdir;
+
         this_bundler.options.react_server_components = ctx.bundler_options.react_server_components;
         this_bundler.resolver.opts.react_server_components = ctx.bundler_options.react_server_components;
+
         this_bundler.options.code_splitting = ctx.bundler_options.code_splitting;
         this_bundler.resolver.opts.code_splitting = ctx.bundler_options.code_splitting;
 
@@ -65,6 +84,106 @@ pub const BuildCommand = struct {
 
         this_bundler.options.minify_identifiers = ctx.bundler_options.minify_identifiers;
         this_bundler.resolver.opts.minify_identifiers = ctx.bundler_options.minify_identifiers;
+
+        if (ctx.bundler_options.compile) {
+            if (ctx.bundler_options.code_splitting) {
+                Output.prettyErrorln("<r><red>error<r><d>:<r> cannot use --compile with --splitting", .{});
+                Global.exit(1);
+                return;
+            }
+
+            if (this_bundler.options.entry_points.len > 1) {
+                Output.prettyErrorln("<r><red>error<r><d>:<r> multiple entry points are not supported with --compile", .{});
+                Global.exit(1);
+                return;
+            }
+
+            if (ctx.bundler_options.outdir.len > 0) {
+                Output.prettyErrorln("<r><red>error<r><d>:<r> cannot use --compile with --outdir", .{});
+                Global.exit(1);
+                return;
+            }
+
+            // We never want to hit the filesystem for these files
+            // This "compiled" protocol is specially handled by the module resolver.
+            this_bundler.options.public_path = "compiled://root/";
+
+            if (outfile.len == 0) {
+                outfile = std.fs.path.basename(this_bundler.options.entry_points[0]);
+                const ext = std.fs.path.extension(outfile);
+                if (ext.len > 0) {
+                    outfile = outfile[0 .. outfile.len - ext.len];
+                }
+
+                if (strings.eqlComptime(outfile, "index")) {
+                    outfile = std.fs.path.basename(std.fs.path.dirname(this_bundler.options.entry_points[0]) orelse "index");
+                }
+
+                if (strings.eqlComptime(outfile, "bun")) {
+                    outfile = std.fs.path.basename(std.fs.path.dirname(this_bundler.options.entry_points[0]) orelse "bun");
+                }
+            }
+
+            // If argv[0] is "bun" or "bunx", we don't check if the binary is standalone
+            if (strings.eqlComptime(outfile, "bun") or strings.eqlComptime(outfile, "bunx")) {
+                Output.prettyErrorln("<r><red>error<r><d>:<r> cannot use --compile with an output file named 'bun' because bun won't realize it's a standalone executable. Please choose a different name for --outfile", .{});
+                Global.exit(1);
+                return;
+            }
+
+            if (ctx.bundler_options.transform_only) {
+                Output.prettyErrorln("<r><red>error<r><d>:<r> --compile does not support --no-bundle", .{});
+                Global.exit(1);
+                return;
+            }
+        }
+
+        if (this_bundler.options.entry_points.len > 1 and ctx.bundler_options.outdir.len == 0) {
+            Output.prettyErrorln("<r><red>error<r><d>:<r> to use multiple entry points, specify <b>--outdir<r>", .{});
+            Global.exit(1);
+            return;
+        }
+
+        this_bundler.options.output_dir = ctx.bundler_options.outdir;
+        this_bundler.resolver.opts.output_dir = ctx.bundler_options.outdir;
+
+        var src_root_dir_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        const src_root_dir: string = brk1: {
+            const path = brk2: {
+                if (ctx.bundler_options.root_dir.len > 0) {
+                    break :brk2 ctx.bundler_options.root_dir;
+                }
+
+                if (this_bundler.options.entry_points.len == 1) {
+                    break :brk2 std.fs.path.dirname(this_bundler.options.entry_points[0]) orelse ".";
+                }
+
+                break :brk2 resolve_path.getIfExistsLongestCommonPath(this_bundler.options.entry_points) orelse ".";
+            };
+
+            var dir = bun.openDirForPath(&(try std.os.toPosixPath(path))) catch |err| {
+                Output.prettyErrorln("<r><red>{s}<r> opening root directory {}", .{ @errorName(err), bun.fmt.quote(path) });
+                Global.exit(1);
+            };
+            defer dir.close();
+
+            break :brk1 bun.getFdPath(dir.fd, &src_root_dir_buf) catch |err| {
+                Output.prettyErrorln("<r><red>{s}<r> resolving root directory {}", .{ @errorName(err), bun.fmt.quote(path) });
+                Global.exit(1);
+            };
+        };
+
+        this_bundler.options.root_dir = src_root_dir;
+        this_bundler.resolver.opts.root_dir = src_root_dir;
+
+        this_bundler.options.react_server_components = ctx.bundler_options.react_server_components;
+        this_bundler.resolver.opts.react_server_components = ctx.bundler_options.react_server_components;
+        this_bundler.options.code_splitting = ctx.bundler_options.code_splitting;
+        this_bundler.resolver.opts.code_splitting = ctx.bundler_options.code_splitting;
+        this_bundler.options.transform_only = ctx.bundler_options.transform_only;
+        if (this_bundler.options.transform_only) {
+            this_bundler.options.resolve_mode = .disable;
+        }
 
         this_bundler.configureLinker();
 
@@ -85,6 +204,9 @@ pub const BuildCommand = struct {
             this_bundler.options.node_modules_bundle_url = "";
         };
 
+        this_bundler.options.jsx.development = !this_bundler.options.production;
+        this_bundler.resolver.opts.jsx.development = this_bundler.options.jsx.development;
+
         if (ctx.debug.macros) |macros| {
             this_bundler.options.macro_remap = macros;
         }
@@ -96,15 +218,12 @@ pub const BuildCommand = struct {
             return;
         }
 
-        if (ctx.debug.dump_limits) {
-            fs.FileSystem.printLimits();
-            Global.exit(0);
-            return;
-        }
+        var reachable_file_count: usize = 0;
+        var minify_duration: u64 = 0;
+        var input_code_length: u64 = 0;
 
         const output_files: []options.OutputFile = brk: {
             if (ctx.bundler_options.transform_only) {
-                this_bundler.linker.options.resolve_mode = .lazy;
                 this_bundler.options.import_path_format = .relative;
                 this_bundler.options.allow_runtime = false;
                 this_bundler.resolver.opts.allow_runtime = false;
@@ -116,7 +235,7 @@ pub const BuildCommand = struct {
                     ctx.args,
                 );
 
-                if (log.msgs.items.len > 0) {
+                if (log.hasErrors()) {
                     try log.printForLogLevel(Output.errorWriter());
 
                     if (result.errors.len > 0 or result.output_files.len == 0) {
@@ -135,6 +254,9 @@ pub const BuildCommand = struct {
                 bun.JSC.AnyEventLoop.init(ctx.allocator),
                 std.crypto.random.int(u64),
                 ctx.debug.hot_reload == .watch,
+                &reachable_file_count,
+                &minify_duration,
+                &input_code_length,
             ) catch |err| {
                 if (log.msgs.items.len > 0) {
                     try log.printForLogLevel(Output.errorWriter());
@@ -147,40 +269,94 @@ pub const BuildCommand = struct {
                 unreachable;
             }).items;
         };
+        const bundled_end = std.time.nanoTimestamp();
 
         {
+            var write_summary = false;
             {
                 dump: {
                     defer Output.flush();
                     var writer = Output.writer();
                     var output_dir = this_bundler.options.output_dir;
-                    if (ctx.bundler_options.outfile.len > 0 and output_files.len == 1 and output_files[0].value == .buffer) {
-                        output_dir = std.fs.path.dirname(ctx.bundler_options.outfile) orelse ".";
-                        output_files[0].input.text = std.fs.path.basename(ctx.bundler_options.outfile);
+                    if (outfile.len > 0 and output_files.len == 1 and output_files[0].value == .buffer) {
+                        output_dir = std.fs.path.dirname(outfile) orelse ".";
+                        output_files[0].dest_path = std.fs.path.basename(outfile);
                     }
 
-                    if (output_dir.len == 0 and ctx.bundler_options.outfile.len == 0) {
-                        // if --transform is passed, it won't have an output dir
-                        if (output_files[0].value == .buffer)
-                            try writer.writeAll(output_files[0].value.buffer.bytes);
-                        break :dump;
+                    if (!ctx.bundler_options.compile) {
+                        if (outfile.len == 0 and output_files.len == 1 and ctx.bundler_options.outdir.len == 0) {
+                            // if --no-bundle is passed, it won't have an output dir
+                            if (output_files[0].value == .buffer)
+                                try writer.writeAll(output_files[0].value.buffer.bytes);
+                            break :dump;
+                        }
                     }
 
-                    const root_path = output_dir;
-                    const root_dir = try std.fs.cwd().makeOpenPathIterable(root_path, .{});
+                    var root_path = output_dir;
+                    if (root_path.len == 0 and ctx.args.entry_points.len == 1)
+                        root_path = std.fs.path.dirname(ctx.args.entry_points[0]) orelse ".";
+
+                    const root_dir = if (root_path.len == 0 or strings.eqlComptime(root_path, "."))
+                        std.fs.IterableDir{ .dir = std.fs.cwd() }
+                    else
+                        std.fs.cwd().makeOpenPathIterable(root_path, .{}) catch |err| {
+                            Output.prettyErrorln("<r><red>{s}<r> while attemping to open output directory {}", .{ @errorName(err), bun.fmt.quote(root_path) });
+                            exitOrWatch(1, ctx.debug.hot_reload == .watch);
+                            unreachable;
+                        };
+
                     var all_paths = try ctx.allocator.alloc([]const u8, output_files.len);
                     var max_path_len: usize = 0;
                     for (all_paths, output_files) |*dest, src| {
-                        dest.* = src.input.text;
+                        dest.* = src.dest_path;
                     }
 
                     var from_path = resolve_path.longestCommonPath(all_paths);
 
                     for (output_files) |f| {
                         max_path_len = std.math.max(
-                            std.math.max(from_path.len, f.input.text.len) + 2 - from_path.len,
+                            std.math.max(from_path.len, f.dest_path.len) + 2 - from_path.len,
                             max_path_len,
                         );
+                    }
+
+                    if (ctx.bundler_options.compile) {
+                        printSummary(
+                            bundled_end,
+                            minify_duration,
+                            this_bundler.options.minify_identifiers or this_bundler.options.minify_whitespace or this_bundler.options.minify_syntax,
+                            input_code_length,
+                            reachable_file_count,
+                            output_files,
+                        );
+
+                        Output.flush();
+                        try bun.StandaloneModuleGraph.toExecutable(
+                            allocator,
+                            output_files,
+                            root_dir,
+                            this_bundler.options.public_path,
+                            outfile,
+                        );
+                        const compiled_elapsed = @divTrunc(@truncate(i64, std.time.nanoTimestamp() - bundled_end), @as(i64, std.time.ns_per_ms));
+                        const compiled_elapsed_digit_count: isize = switch (compiled_elapsed) {
+                            0...9 => 3,
+                            10...99 => 2,
+                            100...999 => 1,
+                            1000...9999 => 0,
+                            else => 0,
+                        };
+                        const padding_buf = [_]u8{' '} ** 16;
+
+                        Output.pretty("{s}", .{padding_buf[0..@intCast(usize, compiled_elapsed_digit_count)]});
+
+                        Output.printElapsedStdoutTrim(@intToFloat(f64, compiled_elapsed));
+
+                        Output.prettyln(" <green>compile<r>  <b><blue>{s}<r>", .{
+                            outfile,
+                        });
+
+                        break :dump;
                     }
 
                     // On posix, file handles automatically close on process exit by the OS
@@ -197,27 +373,56 @@ pub const BuildCommand = struct {
                         switch (f.value) {
                             // Nothing to do in this case
                             .saved => {
-                                rel_path = f.input.text;
-                                if (f.input.text.len > from_path.len) {
-                                    rel_path = resolve_path.relative(from_path, f.input.text);
+                                rel_path = f.dest_path;
+                                if (f.dest_path.len > from_path.len) {
+                                    rel_path = resolve_path.relative(from_path, f.dest_path);
                                 }
                             },
 
                             // easy mode: write the buffer
                             .buffer => |value| {
-                                rel_path = f.input.text;
-                                if (f.input.text.len > from_path.len) {
-                                    rel_path = resolve_path.relative(from_path, f.input.text);
+                                rel_path = f.dest_path;
+                                if (f.dest_path.len > from_path.len) {
+                                    rel_path = resolve_path.relative(from_path, f.dest_path);
                                     if (std.fs.path.dirname(rel_path)) |parent| {
                                         if (parent.len > root_path.len) {
                                             try root_dir.dir.makePath(parent);
                                         }
                                     }
                                 }
-                                try root_dir.dir.writeFile(rel_path, value.bytes);
+                                const JSC = bun.JSC;
+                                var path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+                                switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
+                                    &path_buf,
+                                    JSC.Node.Arguments.WriteFile{
+                                        .data = JSC.Node.StringOrBuffer{
+                                            .buffer = JSC.Buffer{
+                                                .buffer = .{
+                                                    .ptr = @constCast(value.bytes.ptr),
+                                                    // TODO: handle > 4 GB files
+                                                    .len = @truncate(u32, value.bytes.len),
+                                                    .byte_len = @truncate(u32, value.bytes.len),
+                                                },
+                                            },
+                                        },
+                                        .encoding = .buffer,
+                                        .mode = if (f.is_executable) 0o755 else 0o644,
+                                        .dirfd = @intCast(bun.FileDescriptor, root_dir.dir.fd),
+                                        .file = .{
+                                            .path = JSC.Node.PathLike{
+                                                .string = JSC.PathString.init(rel_path),
+                                            },
+                                        },
+                                    },
+                                )) {
+                                    .err => |err| {
+                                        Output.prettyErrorln("<r><red>error<r><d>:<r> failed to write file <b>{}<r>\n{}", .{ bun.fmt.quote(rel_path), err });
+                                    },
+                                    .result => {},
+                                }
                             },
                             .move => |value| {
-                                const primary = f.input.text[from_path.len..];
+                                const primary = f.dest_path[from_path.len..];
                                 bun.copy(u8, filepath_buf[2..], primary);
                                 rel_path = filepath_buf[0 .. primary.len + 2];
                                 rel_path = value.pathname;
@@ -243,8 +448,24 @@ pub const BuildCommand = struct {
                         try std.fmt.formatFloatDecimal(size, .{ .precision = 2 }, writer);
                         try writer.writeAll(" KB\n");
                     }
+
+                    write_summary = true;
+                }
+                if (write_summary and log.errors == 0) {
+                    Output.prettyln("\n", .{});
+                    Output.printElapsedStdoutTrim(
+                        @intToFloat(f64, (@divTrunc(@truncate(i64, std.time.nanoTimestamp() - bun.CLI.start_time), @as(i64, std.time.ns_per_ms)))),
+                    );
+                    if (this_bundler.options.transform_only) {
+                        Output.prettyln(" <green>transpile<r>", .{});
+                    } else {
+                        Output.prettyln(" <green>bundle<r> {d} modules", .{
+                            reachable_file_count,
+                        });
+                    }
                 }
             }
+
             try log.printForLogLevel(Output.errorWriter());
             exitOrWatch(0, ctx.debug.hot_reload == .watch);
         }
@@ -257,4 +478,74 @@ fn exitOrWatch(code: u8, watch: bool) void {
         std.time.sleep(std.math.maxInt(u64) - 1);
     }
     Global.exit(code);
+}
+
+fn printSummary(bundled_end: i128, minify_duration: u64, minified: bool, input_code_length: usize, reachable_file_count: usize, output_files: []const options.OutputFile) void {
+    const padding_buf = [_]u8{' '} ** 16;
+
+    const bundle_until_now = @divTrunc(@truncate(i64, bundled_end - bun.CLI.start_time), @as(i64, std.time.ns_per_ms));
+
+    const bundle_elapsed = if (minified)
+        bundle_until_now - @intCast(i64, @truncate(u63, minify_duration))
+    else
+        bundle_until_now;
+
+    const minified_digit_count: usize = switch (minify_duration) {
+        0...9 => 3,
+        10...99 => 2,
+        100...999 => 1,
+        1000...9999 => 0,
+        else => 0,
+    };
+    if (minified) {
+        Output.pretty("{s}", .{padding_buf[0..@intCast(usize, minified_digit_count)]});
+        Output.printElapsedStdoutTrim(@intToFloat(f64, minify_duration));
+        const output_size = brk: {
+            var total_size: u64 = 0;
+            for (output_files) |f| {
+                if (f.loader == .js) {
+                    total_size += f.size_without_sourcemap;
+                }
+            }
+
+            break :brk total_size;
+        };
+        // this isn't an exact size
+        // we may inject sourcemaps or comments or import paths
+        const delta: i64 = @truncate(i64, @intCast(i65, input_code_length) - @intCast(i65, output_size));
+        if (delta > 1024) {
+            Output.prettyln(
+                "  <green>minify<r>  -{} <d>(estimate)<r>",
+                .{
+                    bun.fmt.size(@intCast(usize, delta)),
+                },
+            );
+        } else if (-delta > 1024) {
+            Output.prettyln(
+                "  <b>minify<r>   +{} <d>(estimate)<r>",
+                .{
+                    bun.fmt.size(@intCast(usize, -delta)),
+                },
+            );
+        } else {
+            Output.prettyln("  <b>minify<r>", .{});
+        }
+    }
+
+    const bundle_elapsed_digit_count: usize = switch (bundle_elapsed) {
+        0...9 => 3,
+        10...99 => 2,
+        100...999 => 1,
+        1000...9999 => 0,
+        else => 0,
+    };
+
+    Output.pretty("{s}", .{padding_buf[0..@intCast(usize, bundle_elapsed_digit_count)]});
+    Output.printElapsedStdoutTrim(@intToFloat(f64, bundle_elapsed));
+    Output.prettyln(
+        "  <green>bundle<r>  {d} modules",
+        .{
+            reachable_file_count,
+        },
+    );
 }

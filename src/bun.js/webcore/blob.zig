@@ -593,7 +593,7 @@ pub const Blob = struct {
 
         var needs_async = false;
         if (data.isString()) {
-            const len = data.getLengthOfArray(ctx);
+            const len = data.getLength(ctx);
 
             if (len < 256 * 1024 or bun.isMissingIOUring()) {
                 const str = data.getZigString(ctx);
@@ -1175,6 +1175,22 @@ pub const Blob = struct {
                     if (this.opened_fd != null_fd) {
                         Callback(this, this.opened_fd);
                         return;
+                    }
+
+                    if (@hasField(This, "file_store")) {
+                        const pathlike = this.file_store.pathlike;
+                        if (pathlike == .fd) {
+                            this.opened_fd = pathlike.fd;
+                            Callback(this, this.opened_fd);
+                            return;
+                        }
+                    } else {
+                        const pathlike = this.file_blob.store.?.data.file.pathlike;
+                        if (pathlike == .fd) {
+                            this.opened_fd = pathlike.fd;
+                            Callback(this, this.opened_fd);
+                            return;
+                        }
                     }
 
                     if (comptime Environment.isMac) {
@@ -2544,6 +2560,25 @@ pub const Blob = struct {
         return ZigString.Empty.toValue(globalThis);
     }
 
+    // TODO: Move this to a separate `File` object or BunFile
+    pub fn getName(
+        this: *Blob,
+        globalThis: *JSC.JSGlobalObject,
+    ) callconv(.C) JSValue {
+        if (this.store) |store| {
+            if (store.data == .file) {
+                if (store.data.file.pathlike == .path) {
+                    return ZigString.fromUTF8(store.data.file.pathlike.path.slice()).toValueGC(globalThis);
+                }
+
+                // we shouldn't return Number here.
+            }
+        }
+
+        return JSC.JSValue.jsUndefined();
+    }
+
+    // TODO: Move this to a separate `File` object or BunFile
     pub fn getLastModified(
         this: *Blob,
         _: *JSC.JSGlobalObject,
@@ -2559,6 +2594,35 @@ pub const Blob = struct {
         }
 
         return JSValue.jsNumber(init_timestamp);
+    }
+
+    pub fn getSizeForBindings(this: *Blob) u64 {
+        if (this.size == Blob.max_size) {
+            this.resolveSize();
+        }
+
+        // If the file doesn't exist or is not seekable
+        // signal that the size is unknown.
+        if (this.store != null and this.store.?.data == .file and
+            !(this.store.?.data.file.seekable orelse false))
+        {
+            return std.math.maxInt(u64);
+        }
+
+        if (this.size == Blob.max_size)
+            return std.math.maxInt(u64);
+
+        return this.size;
+    }
+
+    export fn Bun__Blob__getSizeForBindings(this: *Blob) callconv(.C) u64 {
+        return this.getSizeForBindings();
+    }
+
+    comptime {
+        if (!JSC.is_bindgen) {
+            _ = Bun__Blob__getSizeForBindings;
+        }
     }
 
     pub fn getSize(this: *Blob, _: *JSC.JSGlobalObject) callconv(.C) JSValue {
@@ -3109,7 +3173,6 @@ pub const Blob = struct {
         }
 
         var view_ = this.sharedView();
-        bloblog("sharedView {d}", .{view_.len});
         if (view_.len == 0)
             return JSC.ArrayBuffer.create(global, "", .ArrayBuffer);
 
@@ -3248,6 +3311,15 @@ pub const Blob = struct {
                             return _blob;
                         } else {
                             return blob.dupe();
+                        }
+                    } else if (top_value.as(JSC.API.BuildArtifact)) |build| {
+                        if (comptime move) {
+                            // I don't think this case should happen?
+                            var blob = build.blob;
+                            blob.transfer();
+                            return blob;
+                        } else {
+                            return build.blob.dupe();
                         }
                     }
                 },

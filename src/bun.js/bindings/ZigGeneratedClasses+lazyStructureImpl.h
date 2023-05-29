@@ -5,6 +5,18 @@ void GlobalObject::initGeneratedLazyClasses() {
                  init.setStructure(WebCore::JSBlob::createStructure(init.vm, init.global, init.prototype));
                  init.setConstructor(WebCore::JSBlob::createConstructor(init.vm, init.global, init.prototype));
               });
+    m_JSBuildArtifact.initLater(
+              [](LazyClassStructure::Initializer& init) {
+                 init.setPrototype(WebCore::JSBuildArtifact::createPrototype(init.vm, reinterpret_cast<Zig::GlobalObject*>(init.global)));
+                 init.setStructure(WebCore::JSBuildArtifact::createStructure(init.vm, init.global, init.prototype));
+                 
+              });
+    m_JSBuildMessage.initLater(
+              [](LazyClassStructure::Initializer& init) {
+                 init.setPrototype(WebCore::JSBuildMessage::createPrototype(init.vm, reinterpret_cast<Zig::GlobalObject*>(init.global)));
+                 init.setStructure(WebCore::JSBuildMessage::createStructure(init.vm, init.global, init.prototype));
+                 init.setConstructor(WebCore::JSBuildMessage::createConstructor(init.vm, init.global, init.prototype));
+              });
     m_JSCryptoHasher.initLater(
               [](LazyClassStructure::Initializer& init) {
                  init.setPrototype(WebCore::JSCryptoHasher::createPrototype(init.vm, reinterpret_cast<Zig::GlobalObject*>(init.global)));
@@ -70,6 +82,12 @@ void GlobalObject::initGeneratedLazyClasses() {
                  init.setPrototype(WebCore::JSRequest::createPrototype(init.vm, reinterpret_cast<Zig::GlobalObject*>(init.global)));
                  init.setStructure(WebCore::JSRequest::createStructure(init.vm, init.global, init.prototype));
                  init.setConstructor(WebCore::JSRequest::createConstructor(init.vm, init.global, init.prototype));
+              });
+    m_JSResolveMessage.initLater(
+              [](LazyClassStructure::Initializer& init) {
+                 init.setPrototype(WebCore::JSResolveMessage::createPrototype(init.vm, reinterpret_cast<Zig::GlobalObject*>(init.global)));
+                 init.setStructure(WebCore::JSResolveMessage::createStructure(init.vm, init.global, init.prototype));
+                 init.setConstructor(WebCore::JSResolveMessage::createConstructor(init.vm, init.global, init.prototype));
               });
     m_JSResponse.initLater(
               [](LazyClassStructure::Initializer& init) {
@@ -166,6 +184,8 @@ template<typename Visitor>
 void GlobalObject::visitGeneratedLazyClasses(GlobalObject *thisObject, Visitor& visitor)
 {
       thisObject->m_JSBlob.visit(visitor);  visitor.append(thisObject->m_JSBlobSetterValue);
+      thisObject->m_JSBuildArtifact.visit(visitor);  visitor.append(thisObject->m_JSBuildArtifactSetterValue);
+      thisObject->m_JSBuildMessage.visit(visitor);  visitor.append(thisObject->m_JSBuildMessageSetterValue);
       thisObject->m_JSCryptoHasher.visit(visitor);  visitor.append(thisObject->m_JSCryptoHasherSetterValue);
       thisObject->m_JSDirent.visit(visitor);  visitor.append(thisObject->m_JSDirentSetterValue);
       thisObject->m_JSExpect.visit(visitor);  visitor.append(thisObject->m_JSExpectSetterValue);
@@ -177,6 +197,7 @@ void GlobalObject::visitGeneratedLazyClasses(GlobalObject *thisObject, Visitor& 
       thisObject->m_JSMatchedRoute.visit(visitor);  visitor.append(thisObject->m_JSMatchedRouteSetterValue);
       thisObject->m_JSNodeJSFS.visit(visitor);  visitor.append(thisObject->m_JSNodeJSFSSetterValue);
       thisObject->m_JSRequest.visit(visitor);  visitor.append(thisObject->m_JSRequestSetterValue);
+      thisObject->m_JSResolveMessage.visit(visitor);  visitor.append(thisObject->m_JSResolveMessageSetterValue);
       thisObject->m_JSResponse.visit(visitor);  visitor.append(thisObject->m_JSResponseSetterValue);
       thisObject->m_JSSHA1.visit(visitor);  visitor.append(thisObject->m_JSSHA1SetterValue);
       thisObject->m_JSSHA224.visit(visitor);  visitor.append(thisObject->m_JSSHA224SetterValue);

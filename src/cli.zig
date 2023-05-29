@@ -89,6 +89,7 @@ fn invalidTarget(diag: *clap.Diagnostic, _target: []const u8) noreturn {
     diag.report(Output.errorWriter(), error.InvalidTarget) catch {};
     std.process.exit(1);
 }
+
 pub const Arguments = struct {
     pub fn loader_resolver(in: string) !Api.Loader {
         const option_loader = options.Loader.fromString(in) orelse return error.InvalidLoader;
@@ -141,7 +142,6 @@ pub const Arguments = struct {
         clap.parseParam("--jsx-factory <STR>               Changes the function called when compiling JSX elements using the classic JSX runtime") catch unreachable,
         clap.parseParam("--jsx-fragment <STR>              Changes the function called when compiling JSX fragments") catch unreachable,
         clap.parseParam("--jsx-import-source <STR>         Declares the module specifier to be used for importing the jsx and jsxs factory functions. Default: \"react\"") catch unreachable,
-        clap.parseParam("--jsx-production                  Use jsx instead of jsxDEV (default) for the automatic runtime") catch unreachable,
         clap.parseParam("--jsx-runtime <STR>               \"automatic\" (default) or \"classic\"") catch unreachable,
         clap.parseParam("-r, --preload <STR>...            Import a module before other modules are loaded") catch unreachable,
         clap.parseParam("--main-fields <STR>...            Main fields to lookup in package.json. Defaults to --target dependent") catch unreachable,
@@ -194,21 +194,24 @@ pub const Arguments = struct {
     pub const params = public_params ++ debug_params;
 
     const build_only_params = [_]ParamType{
+        clap.parseParam("--format <STR>                   Specifies the module format to build to. Only esm is supported.") catch unreachable,
         clap.parseParam("--outdir <STR>                   Default to \"dist\" if multiple files") catch unreachable,
         clap.parseParam("--outfile <STR>                  Write to a file") catch unreachable,
+        clap.parseParam("--root <STR>                     Root directory used for multiple entry points") catch unreachable,
         clap.parseParam("--splitting                      Enable code splitting") catch unreachable,
-        // clap.parseParam("--manifest <STR>                 Write JSON manifest") catch unreachable,
-        // clap.parseParam("--public-path <STR>              A prefix to be appended to any import paths in bundled code") catch unreachable,
+        clap.parseParam("--public-path <STR>              A prefix to be appended to any import paths in bundled code") catch unreachable,
         clap.parseParam("--sourcemap <STR>?               Build with sourcemaps - 'inline', 'external', or 'none'") catch unreachable,
         clap.parseParam("--entry-naming <STR>             Customize entry point filenames. Defaults to \"[dir]/[name].[ext]\"") catch unreachable,
         clap.parseParam("--chunk-naming <STR>             Customize chunk filenames. Defaults to \"[name]-[hash].[ext]\"") catch unreachable,
         clap.parseParam("--asset-naming <STR>             Customize asset filenames. Defaults to \"[name]-[hash].[ext]\"") catch unreachable,
         clap.parseParam("--server-components              Enable React Server Components (experimental)") catch unreachable,
-        clap.parseParam("--transform                      Single file transform, do not bundle") catch unreachable,
+        clap.parseParam("--no-bundle                      Transpile file only, do not bundle") catch unreachable,
+        clap.parseParam("--compile                       Generate a standalone Bun executable containing your bundled code") catch unreachable,
     };
 
     // TODO: update test completions
     const test_only_params = [_]ParamType{
+        clap.parseParam("--timeout <NUMBER>               Set the per-test timeout in milliseconds, default is 5000.") catch unreachable,
         clap.parseParam("--update-snapshots               Update snapshot files") catch unreachable,
         clap.parseParam("--rerun-each <NUMBER>            Re-run each test file <NUMBER> times, helps catch certain bugs") catch unreachable,
     };
@@ -369,6 +372,14 @@ pub const Arguments = struct {
         }
 
         if (cmd == .TestCommand) {
+            if (args.option("--timeout")) |timeout_ms| {
+                if (timeout_ms.len > 0) {
+                    ctx.test_options.default_timeout_ms = std.fmt.parseInt(u32, timeout_ms, 10) catch {
+                        Output.prettyErrorln("<r><red>error<r>: Invalid timeout: \"{s}\"", .{timeout_ms});
+                        Global.exit(1);
+                    };
+                }
+            }
             ctx.test_options.update_snapshots = args.flag("--update-snapshots");
             if (args.option("--rerun-each")) |repeat_count| {
                 if (repeat_count.len > 0) {
@@ -437,7 +448,7 @@ pub const Arguments = struct {
 
         opts.no_summary = args.flag("--no-summary");
 
-        if (cmd != .DevCommand) {
+        if (cmd == .AutoCommand or cmd == .RunCommand or cmd == .TestCommand) {
             const preloads = args.options("--preload");
             if (ctx.preloads.len > 0 and preloads.len > 0) {
                 var all = std.ArrayList(string).initCapacity(ctx.allocator, ctx.preloads.len + preloads.len) catch unreachable;
@@ -477,7 +488,11 @@ pub const Arguments = struct {
         ctx.bundler_options.minify_identifiers = minify_flag or args.flag("--minify-identifiers");
 
         if (cmd == .BuildCommand) {
-            ctx.bundler_options.transform_only = args.flag("--transform");
+            ctx.bundler_options.transform_only = args.flag("--no-bundle");
+
+            if (args.flag("--compile")) {
+                ctx.bundler_options.compile = true;
+            }
 
             if (args.option("--outdir")) |outdir| {
                 if (outdir.len > 0) {
@@ -486,6 +501,26 @@ pub const Arguments = struct {
             } else if (args.option("--outfile")) |outfile| {
                 if (outfile.len > 0) {
                     ctx.bundler_options.outfile = outfile;
+                }
+            }
+
+            if (args.option("--root")) |root_dir| {
+                if (root_dir.len > 0) {
+                    ctx.bundler_options.root_dir = root_dir;
+                }
+            }
+
+            if (args.option("--format")) |format_str| {
+                const format = options.Format.fromString(format_str) orelse {
+                    Output.prettyErrorln("<r><red>error<r>: Invalid format - must be esm, cjs, or iife", .{});
+                    Global.crash();
+                };
+                switch (format) {
+                    .esm => {},
+                    else => {
+                        Output.prettyErrorln("<r><red>error<r>: Formats besides 'esm' are not implemented", .{});
+                        Global.crash();
+                    },
                 }
             }
 
@@ -534,7 +569,14 @@ pub const Arguments = struct {
                         entry_points[0],
                         "build",
                     ) or strings.eqlComptime(entry_points[0], "bun"))) {
-                        entry_points = entry_points[1..];
+                        var out_entry = entry_points[1..];
+                        for (entry_points, 0..) |entry, i| {
+                            if (entry.len > 0) {
+                                out_entry = out_entry[i..];
+                                break;
+                            }
+                        }
+                        entry_points = out_entry;
                     }
                 },
                 .DevCommand => {
@@ -569,9 +611,8 @@ pub const Arguments = struct {
         var jsx_fragment = args.option("--jsx-fragment");
         var jsx_import_source = args.option("--jsx-import-source");
         var jsx_runtime = args.option("--jsx-runtime");
-        var jsx_production = args.flag("--jsx-production");
         const react_fast_refresh = switch (comptime cmd) {
-            .DevCommand => !(args.flag("--disable-react-fast-refresh") or jsx_production),
+            .DevCommand => !args.flag("--disable-react-fast-refresh"),
             else => true,
         };
 
@@ -641,34 +682,6 @@ pub const Arguments = struct {
 
         opts.resolve = Api.ResolveMode.lazy;
 
-        switch (comptime cmd) {
-            .BuildCommand => {
-                // if (args.option("--resolve")) |_resolve| {
-                //     switch (ResolveMatcher.match(_resolve)) {
-                //         ResolveMatcher.case("disable") => {
-                //             opts.resolve = Api.ResolveMode.disable;
-                //         },
-                //         ResolveMatcher.case("bundle") => {
-                //             opts.resolve = Api.ResolveMode.bundle;
-                //         },
-                //         ResolveMatcher.case("dev") => {
-                //             opts.resolve = Api.ResolveMode.dev;
-                //         },
-                //         ResolveMatcher.case("lazy") => {
-                //             opts.resolve = Api.ResolveMode.lazy;
-                //         },
-                //         else => {
-                //             diag.name.long = "--resolve";
-                //             diag.arg = _resolve;
-                //             try diag.report(Output.errorWriter(), error.InvalidResolveOption);
-                //             std.process.exit(1);
-                //         },
-                //     }
-                // }
-            },
-            else => {},
-        }
-
         const TargetMatcher = strings.ExactSizeMatcher(8);
 
         if (args.option("--target")) |_target| {
@@ -689,7 +702,7 @@ pub const Arguments = struct {
             jsx_fragment != null or
             jsx_import_source != null or
             jsx_runtime != null or
-            jsx_production or !react_fast_refresh)
+            !react_fast_refresh)
         {
             var default_factory = "".*;
             var default_fragment = "".*;
@@ -699,8 +712,8 @@ pub const Arguments = struct {
                     .factory = constStrToU8(jsx_factory orelse &default_factory),
                     .fragment = constStrToU8(jsx_fragment orelse &default_fragment),
                     .import_source = constStrToU8(jsx_import_source orelse &default_import_source),
-                    .runtime = if (jsx_runtime != null) try resolve_jsx_runtime(jsx_runtime.?) else Api.JsxRuntime.automatic,
-                    .development = !jsx_production,
+                    .runtime = if (jsx_runtime) |runtime| try resolve_jsx_runtime(runtime) else Api.JsxRuntime.automatic,
+                    .development = false,
                     .react_fast_refresh = react_fast_refresh,
                 };
             } else {
@@ -708,8 +721,8 @@ pub const Arguments = struct {
                     .factory = constStrToU8(jsx_factory orelse opts.jsx.?.factory),
                     .fragment = constStrToU8(jsx_fragment orelse opts.jsx.?.fragment),
                     .import_source = constStrToU8(jsx_import_source orelse opts.jsx.?.import_source),
-                    .runtime = if (jsx_runtime != null) try resolve_jsx_runtime(jsx_runtime.?) else opts.jsx.?.runtime,
-                    .development = !jsx_production,
+                    .runtime = if (jsx_runtime) |runtime| try resolve_jsx_runtime(runtime) else opts.jsx.?.runtime,
+                    .development = false,
                     .react_fast_refresh = react_fast_refresh,
                 };
             }
@@ -900,6 +913,7 @@ pub const Command = struct {
     };
 
     pub const TestOptions = struct {
+        default_timeout_ms: u32 = 5 * std.time.ms_per_s,
         update_snapshots: bool = false,
         repeat_count: u32 = 0,
     };
@@ -921,9 +935,12 @@ pub const Command = struct {
         has_loaded_global_config: bool = false,
 
         pub const BundlerOptions = struct {
+            compile: bool = false,
+
             outdir: []const u8 = "",
             outfile: []const u8 = "",
-            entry_naming: []const u8 = "./[name].[ext]",
+            root_dir: []const u8 = "",
+            entry_naming: []const u8 = "[dir]/[name].[ext]",
             chunk_naming: []const u8 = "./[name]-[hash].[ext]",
             asset_naming: []const u8 = "./[name]-[hash].[ext]",
             react_server_components: bool = false,
@@ -1096,6 +1113,31 @@ pub const Command = struct {
             // _ = TestCommand;
             // _ = UpgradeCommand;
             // _ = BunxCommand;
+        }
+
+        if (try bun.StandaloneModuleGraph.fromExecutable(bun.default_allocator)) |graph| {
+            var ctx = Command.Context{
+                .args = std.mem.zeroes(Api.TransformOptions),
+                .log = log,
+                .start_time = start_time,
+                .allocator = bun.default_allocator,
+            };
+
+            ctx.args.target = Api.Target.bun;
+            var argv = try bun.default_allocator.alloc(string, std.os.argv.len -| 1);
+            if (std.os.argv.len > 1) {
+                for (argv, std.os.argv[1..]) |*dest, src| {
+                    dest.* = bun.span(src);
+                }
+            }
+            ctx.passthrough = argv;
+
+            try @import("./bun_js.zig").Run.bootStandalone(
+                ctx,
+                graph.entryPoint().name,
+                graph,
+            );
+            return;
         }
 
         const tag = which();

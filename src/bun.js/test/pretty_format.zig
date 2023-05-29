@@ -443,7 +443,7 @@ pub const JestPrettyFormat = struct {
                     };
                 }
 
-                if (js_type == .PureForwardingProxy) {
+                if (js_type == .GlobalProxy) {
                     return Tag.get(
                         JSC.JSValue.c(JSC.C.JSObjectGetProxyTarget(value.asObjectRef())),
                         globalThis,
@@ -826,17 +826,17 @@ pub const JestPrettyFormat = struct {
 
                         // TODO: make this one pass?
                         if (!key.is16Bit() and JSLexer.isLatin1Identifier(@TypeOf(key.slice()), key.slice())) {
-                            this.addForNewLine(key.len + 1);
+                            this.addForNewLine(key.len + 2);
 
                             writer.print(
-                                comptime Output.prettyFmt("\"{}\"<d>:<r> ", enable_ansi_colors),
+                                comptime Output.prettyFmt("<r>\"{}\"<d>:<r> ", enable_ansi_colors),
                                 .{key},
                             );
                         } else if (key.is16Bit() and JSLexer.isLatin1Identifier(@TypeOf(key.utf16SliceAligned()), key.utf16SliceAligned())) {
-                            this.addForNewLine(key.len + 1);
+                            this.addForNewLine(key.len + 2);
 
                             writer.print(
-                                comptime Output.prettyFmt("\"{}\"<d>:<r> ", enable_ansi_colors),
+                                comptime Output.prettyFmt("<r>\"{}\"<d>:<r> ", enable_ansi_colors),
                                 .{key},
                             );
                         } else if (key.is16Bit()) {
@@ -863,10 +863,10 @@ pub const JestPrettyFormat = struct {
                                 .{},
                             );
                         } else {
-                            this.addForNewLine(key.len + 1);
+                            this.addForNewLine(key.len + 2);
 
                             writer.print(
-                                comptime Output.prettyFmt("{s}<d>:<r> ", enable_ansi_colors),
+                                comptime Output.prettyFmt("<r><green>{s}<r><d>:<r> ", enable_ansi_colors),
                                 .{JSPrinter.formatJSONString(key.slice())},
                             );
                         }
@@ -1137,7 +1137,7 @@ pub const JestPrettyFormat = struct {
                     writer.writeAll("[Function]");
                 },
                 .Array => {
-                    const len = @truncate(u32, value.getLengthOfArray(this.globalThis));
+                    const len = @truncate(u32, value.getLength(this.globalThis));
                     if (len == 0) {
                         writer.writeAll("[]");
                         this.addForNewLine(2);
@@ -1227,6 +1227,9 @@ pub const JestPrettyFormat = struct {
                     } else if (value.as(JSC.WebCore.Request)) |request| {
                         request.writeFormat(Formatter, this, writer_, enable_ansi_colors) catch {};
                         return;
+                    } else if (value.as(JSC.API.BuildArtifact)) |build| {
+                        build.writeFormat(Formatter, this, writer_, enable_ansi_colors) catch {};
+                        return;
                     } else if (value.as(JSC.WebCore.Blob)) |blob| {
                         blob.writeFormat(Formatter, this, writer_, enable_ansi_colors) catch {};
                         return;
@@ -1258,24 +1261,13 @@ pub const JestPrettyFormat = struct {
                         }
 
                         return;
+                    } else if (value.as(JSC.BuildMessage)) |build_log| {
+                        build_log.msg.writeFormat(writer_, enable_ansi_colors) catch {};
+                        return;
+                    } else if (value.as(JSC.ResolveMessage)) |resolve_log| {
+                        resolve_log.msg.writeFormat(writer_, enable_ansi_colors) catch {};
+                        return;
                     } else if (jsType != .DOMWrapper) {
-                        if (CAPI.JSObjectGetPrivate(value.asRef())) |private_data_ptr| {
-                            const priv_data = JSPrivateDataPtr.from(private_data_ptr);
-                            switch (priv_data.tag()) {
-                                .BuildError => {
-                                    const build_error = priv_data.as(JS.BuildError);
-                                    build_error.msg.writeFormat(writer_, enable_ansi_colors) catch {};
-                                    return;
-                                },
-                                .ResolveError => {
-                                    const resolve_error = priv_data.as(JS.ResolveError);
-                                    resolve_error.msg.writeFormat(writer_, enable_ansi_colors) catch {};
-                                    return;
-                                },
-                                else => {},
-                            }
-                        }
-
                         if (value.isCallable(this.globalThis.vm())) {
                             return this.printAs(.Function, Writer, writer_, value, jsType, enable_ansi_colors);
                         }
@@ -1622,7 +1614,7 @@ pub const JestPrettyFormat = struct {
                                                 this.writeIndent(Writer, writer_) catch unreachable;
                                             },
                                             .Array => {
-                                                const length = children.getLengthOfArray(this.globalThis);
+                                                const length = children.getLength(this.globalThis);
                                                 if (length == 0) break :print_children;
                                                 writer.writeAll(">\n");
 

@@ -161,7 +161,7 @@ pub const fmt = struct {
                 try fmt.formatFloatDecimal(new_value / 1000.0, .{ .precision = 2 }, writer);
                 return writer.writeAll(" KB");
             } else {
-                try fmt.formatFloatDecimal(new_value, .{ .precision = if (std.math.approxEqAbs(f64, new_value, @trunc(new_value), 0.100)) @as(usize, 0) else @as(usize, 2) }, writer);
+                try fmt.formatFloatDecimal(new_value, .{ .precision = if (std.math.approxEqAbs(f64, new_value, @trunc(new_value), 0.100)) @as(usize, 1) else @as(usize, 2) }, writer);
             }
 
             const buf = switch (1000) {
@@ -784,6 +784,31 @@ pub const StringHashMapContext = struct {
             return strings.eqlLong(a, b, true);
         }
     };
+
+    pub const PrehashedCaseInsensitive = struct {
+        value: u64,
+        input: []const u8,
+        pub fn init(allocator: std.mem.Allocator, input: []const u8) PrehashedCaseInsensitive {
+            var out = allocator.alloc(u8, input.len) catch unreachable;
+            _ = strings.copyLowercase(input, out);
+            return PrehashedCaseInsensitive{
+                .value = StringHashMapContext.hash(.{}, out),
+                .input = out,
+            };
+        }
+        pub fn deinit(this: @This(), allocator: std.mem.Allocator) void {
+            allocator.free(this.input);
+        }
+        pub fn hash(this: @This(), s: []const u8) u64 {
+            if (s.ptr == this.input.ptr and s.len == this.input.len)
+                return this.value;
+            return StringHashMapContext.hash(.{}, s);
+        }
+
+        pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
+            return strings.eqlCaseInsensitiveASCIIICheckLength(a, b);
+        }
+    };
 };
 
 pub fn StringArrayHashMap(comptime Type: type) type {
@@ -1360,10 +1385,14 @@ pub const StringMap = struct {
 
         entry.value_ptr.* = try self.map.allocator.dupe(u8, value);
     }
-
     pub const put = insert;
+
     pub fn get(self: *const StringMap, key: []const u8) ?[]const u8 {
         return self.map.get(key);
+    }
+
+    pub fn sort(self: *StringMap, sort_ctx: anytype) void {
+        self.map.sort(sort_ctx);
     }
 
     pub fn deinit(self: *StringMap) void {
@@ -1465,3 +1494,32 @@ pub fn HiveRef(comptime T: type, comptime capacity: u16) type {
 }
 
 pub const MaxHeapAllocator = @import("./max_heap_allocator.zig").MaxHeapAllocator;
+
+pub const tracy = @import("./tracy.zig");
+pub const trace = tracy.trace;
+
+pub fn openFileForPath(path_: [:0]const u8) !std.fs.File {
+    const O_PATH = if (comptime Environment.isLinux) std.os.O.PATH else std.os.O.RDONLY;
+    const flags: u32 = std.os.O.CLOEXEC | std.os.O.NOCTTY | O_PATH;
+
+    const fd = try std.os.openZ(path_, flags, 0);
+    return std.fs.File{
+        .handle = fd,
+    };
+}
+
+pub fn openDirForPath(path_: [:0]const u8) !std.fs.Dir {
+    const O_PATH = if (comptime Environment.isLinux) std.os.O.PATH else std.os.O.RDONLY;
+    const flags: u32 = std.os.O.CLOEXEC | std.os.O.NOCTTY | std.os.O.DIRECTORY | O_PATH;
+
+    const fd = try std.os.openZ(path_, flags, 0);
+    return std.fs.Dir{
+        .fd = fd,
+    };
+}
+
+pub const Generation = u16;
+
+pub const zstd = @import("./deps/zstd.zig");
+pub const StringPointer = Schema.Api.StringPointer;
+pub const StandaloneModuleGraph = @import("./standalone_bun.zig").StandaloneModuleGraph;

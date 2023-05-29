@@ -25,6 +25,10 @@ pub const MutableString = struct {
         };
     }
 
+    pub fn isEmpty(this: *const MutableString) bool {
+        return this.list.items.len == 0;
+    }
+
     pub fn deinit(str: *MutableString) void {
         if (str.list.capacity > 0) {
             str.list.expandToCapacity();
@@ -105,7 +109,12 @@ pub const MutableString = struct {
         }
 
         if (needs_gap) {
-            var mutable = try MutableString.initCopy(allocator, str[0..start_i]);
+            var mutable = try MutableString.initCopy(allocator, if (start_i == 0)
+                // the first letter can be a non-identifier start
+                // https://github.com/oven-sh/bun/issues/2946
+                "_"
+            else
+                str[0..start_i]);
             needs_gap = false;
 
             var slice = str[start_i..];
@@ -131,6 +140,10 @@ pub const MutableString = struct {
                 try mutable.appendChar('_');
                 needs_gap = false;
                 has_needed_gap = true;
+            }
+
+            if (comptime bun.Environment.allow_assert) {
+                std.debug.assert(js_lexer.isIdentifier(mutable.list.items));
             }
 
             return try mutable.list.toOwnedSlice(allocator);
@@ -246,7 +259,7 @@ pub const MutableString = struct {
         return self.indexOfChar(char) != null;
     }
 
-    pub fn indexOfChar(self: *const MutableString, char: u8) ?usize {
+    pub fn indexOfChar(self: *const MutableString, char: u8) ?u32 {
         return strings.indexOfChar(self.list.items, char);
     }
 

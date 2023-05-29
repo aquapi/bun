@@ -531,7 +531,7 @@ pub const Os = struct {
             // Does this entry already exist?
             if (ret.get(globalThis, interface_name)) |array| {
                 // Add this interface entry to the existing array
-                const next_index = @intCast(u32, array.getLengthOfArray(globalThis));
+                const next_index = @intCast(u32, array.getLength(globalThis));
                 array.putIndex(globalThis, next_index, interface);
             } else {
                 // Add it as an array with this interface as an element
@@ -668,7 +668,7 @@ pub const Os = struct {
         return JSC.JSValue.jsNumberFromUint64(C.getSystemUptime());
     }
 
-    pub fn userInfo(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) JSC.JSValue {
+    pub fn userInfo(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
         const result = JSC.JSValue.createEmptyObject(globalThis, 5);
 
         result.put(globalThis, JSC.ZigString.static("homedir"), homedir(globalThis, callframe));

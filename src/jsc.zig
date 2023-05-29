@@ -12,6 +12,8 @@ pub usingnamespace @import("./bun.js/javascript.zig");
 pub usingnamespace @import("./bun.js/module_loader.zig");
 pub const C = @import("./bun.js/javascript_core_c_api.zig");
 pub const WebCore = @import("./bun.js/webcore.zig");
+pub const BuildMessage = @import("./bun.js/BuildMessage.zig").BuildMessage;
+pub const ResolveMessage = @import("./bun.js/ResolveMessage.zig").ResolveMessage;
 pub const Cloudflare = struct {
     pub const HTMLRewriter = @import("./bun.js/api/html_rewriter.zig").HTMLRewriter;
     pub const ContentOptions = @import("./bun.js/api/html_rewriter.zig").ContentOptions;
@@ -26,6 +28,7 @@ pub const Cloudflare = struct {
 pub const Jest = @import("./bun.js/test/jest.zig");
 pub const API = struct {
     pub const JSBundler = @import("./bun.js/api/JSBundler.zig").JSBundler;
+    pub const BuildArtifact = @import("./bun.js/api/JSBundler.zig").BuildArtifact;
     pub const JSTranspiler = @import("./bun.js/api/JSTranspiler.zig");
     pub const Server = @import("./bun.js/api/server.zig").Server;
     pub const ServerConfig = @import("./bun.js/api/server.zig").ServerConfig;

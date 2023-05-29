@@ -37,6 +37,9 @@ describe("websocket server", () => {
     var server = serve({
       port: 0,
       websocket: {
+        // FIXME: update this test to not rely on publishToSelf: true,
+        publishToSelf: true,
+
         open(ws) {
           ws.subscribe("all");
         },
@@ -115,6 +118,9 @@ describe("websocket server", () => {
         var server = serve({
           port: 0,
           websocket: {
+            // FIXME: update this test to not rely on publishToSelf: true,
+            publishToSelf: true,
+
             open(ws) {
               ws.subscribe("all");
             },
@@ -171,7 +177,6 @@ describe("websocket server", () => {
 
   it("close inside open", async () => {
     var resolve: () => void;
-    console.trace("here");
     var server = serve({
       port: 0,
       websocket: {
@@ -436,15 +441,54 @@ describe("websocket server", () => {
           server.stop();
         },
         message(ws, msg) {
-          if (ws.binaryType === "uint8array") {
-            expect(ws.binaryType).toBe("uint8array");
-            ws.binaryType = "arraybuffer";
-            expect(ws.binaryType).toBe("arraybuffer");
-            expect(msg instanceof Uint8Array).toBe(true);
-          } else {
-            expect(ws.binaryType).toBe("arraybuffer");
-            expect(msg instanceof ArrayBuffer).toBe(true);
-            done = true;
+          // The first message is supposed to be "uint8array"
+          // Then after uint8array, we switch it to "nodebuffer"
+          // Then after nodebuffer, we switch it to "arraybuffer"
+          // and then we're done
+          switch (ws.binaryType) {
+            case "nodebuffer": {
+              for (let badType of [
+                123,
+                NaN,
+                Symbol("uint8array"),
+                "uint16array",
+                "uint32array",
+                "float32array",
+                "float64array",
+                "garbage",
+              ]) {
+                expect(() => {
+                  /* @ts-ignore */
+                  ws.binaryType = badType;
+                }).toThrow();
+              }
+              expect(ws.binaryType).toBe("nodebuffer");
+              ws.binaryType = "uint8array";
+              expect(ws.binaryType).toBe("uint8array");
+              expect(msg instanceof Uint8Array).toBe(true);
+              expect(Buffer.isBuffer(msg)).toBe(true);
+              break;
+            }
+
+            case "uint8array": {
+              expect(ws.binaryType).toBe("uint8array");
+              ws.binaryType = "arraybuffer";
+              expect(ws.binaryType).toBe("arraybuffer");
+              expect(msg instanceof Uint8Array).toBe(true);
+              expect(Buffer.isBuffer(msg)).toBe(false);
+              break;
+            }
+
+            case "arraybuffer": {
+              expect(ws.binaryType).toBe("arraybuffer");
+              expect(msg instanceof ArrayBuffer).toBe(true);
+              done = true;
+              break;
+            }
+
+            default: {
+              throw new Error("unknown binaryType");
+            }
           }
 
           ws.send("hello world");
@@ -463,7 +507,7 @@ describe("websocket server", () => {
       },
     });
 
-    await new Promise<boolean>((resolve, reject) => {
+    const isDone = await new Promise<boolean>((resolve, reject) => {
       var counter = 0;
       const websocket = new WebSocket(`ws://${server.hostname}:${server.port}`);
       websocket.onopen = () => {
@@ -473,7 +517,7 @@ describe("websocket server", () => {
         try {
           expect(e.data).toBe("hello world");
 
-          if (counter++ > 0) {
+          if (counter++ > 2) {
             websocket.close();
             resolve(done);
           }
@@ -487,6 +531,7 @@ describe("websocket server", () => {
         reject(e);
       };
     });
+    expect(isDone).toBe(true);
   });
 
   it("does not upgrade for non-websocket connections", async () => {
@@ -578,6 +623,9 @@ describe("websocket server", () => {
       var server = serve({
         port: 0,
         websocket: {
+          // FIXME: update this test to not rely on publishToSelf: true,
+          publishToSelf: true,
+
           async open(ws) {
             // we don't care about the data
             // we just want to make sure the DOMJIT call doesn't crash
@@ -608,6 +656,9 @@ describe("websocket server", () => {
       var server = serve({
         port: 0,
         websocket: {
+          // FIXME: update this test to not rely on publishToSelf: true,
+          publishToSelf: true,
+
           async open(ws) {
             // we don't care about the data
             // we just want to make sure the DOMJIT call doesn't crash
@@ -869,6 +920,9 @@ describe("websocket server", () => {
     const server = serve({
       port: 0,
       websocket: {
+        // FIXME: update this test to not rely on publishToSelf: true,
+        publishToSelf: true,
+
         open(ws) {
           server.stop();
           ws.subscribe("test");
@@ -983,5 +1037,149 @@ describe("websocket server", () => {
     });
     expect(serverCounter).toBe(sendQueue.length);
     server.stop(true);
+  });
+  it("can close with reason and code #2631", done => {
+    let timeout: any;
+    let server = Bun.serve({
+      websocket: {
+        message(ws) {
+          ws.close(2000, "test");
+        },
+        open(ws) {
+          try {
+            expect(ws.remoteAddress).toBe("127.0.0.1");
+          } catch (e) {
+            clearTimeout(timeout);
+            done(e);
+          }
+        },
+        close(ws, code, reason) {
+          try {
+            expect(code).toBe(2000);
+            expect(reason).toBe("test");
+            clearTimeout(timeout);
+            done();
+          } catch (e) {
+            clearTimeout(timeout);
+            done(e);
+          }
+        },
+      },
+      fetch(req, server) {
+        if (!server.upgrade(req)) {
+          return new Response(null, { status: 404 });
+        }
+      },
+      port: 0,
+    });
+
+    let z = new WebSocket(`ws://${server.hostname}:${server.port}`);
+    z.addEventListener("open", () => {
+      z.send("test");
+    });
+    z.addEventListener("close", () => {
+      server.stop();
+    });
+
+    timeout = setTimeout(() => {
+      done(new Error("Did not close in time"));
+      server.stop(true);
+    }, 1000);
+  });
+
+  it("can close with code and without reason #2631", done => {
+    let timeout: any;
+    let server = Bun.serve({
+      websocket: {
+        message(ws) {
+          ws.close(2000);
+        },
+        open(ws) {
+          try {
+            expect(ws.remoteAddress).toBe("127.0.0.1");
+          } catch (e) {
+            done(e);
+            clearTimeout(timeout);
+          }
+        },
+        close(ws, code, reason) {
+          clearTimeout(timeout);
+
+          try {
+            expect(code).toBe(2000);
+            expect(reason).toBe("");
+            done();
+          } catch (e) {
+            done(e);
+          }
+        },
+      },
+      fetch(req, server) {
+        if (!server.upgrade(req)) {
+          return new Response(null, { status: 404 });
+        }
+      },
+      port: 0,
+    });
+
+    let z = new WebSocket(`ws://${server.hostname}:${server.port}`);
+    z.addEventListener("open", () => {
+      z.send("test");
+    });
+    z.addEventListener("close", () => {
+      server.stop();
+    });
+
+    timeout = setTimeout(() => {
+      done(new Error("Did not close in time"));
+      server.stop(true);
+    }, 1000);
+  });
+  it("can close without reason or code #2631", done => {
+    let timeout: any;
+    let server = Bun.serve({
+      websocket: {
+        message(ws) {
+          ws.close();
+        },
+        open(ws) {
+          try {
+            expect(ws.remoteAddress).toBe("127.0.0.1");
+          } catch (e) {
+            clearTimeout(timeout);
+            done(e);
+          }
+        },
+        close(ws, code, reason) {
+          clearTimeout(timeout);
+          try {
+            expect(code).toBe(1006);
+            expect(reason).toBe("");
+            done();
+          } catch (e) {
+            done(e);
+          }
+        },
+      },
+      fetch(req, server) {
+        if (!server.upgrade(req)) {
+          return new Response(null, { status: 404 });
+        }
+      },
+      port: 0,
+    });
+
+    let z = new WebSocket(`ws://${server.hostname}:${server.port}`);
+    z.addEventListener("open", () => {
+      z.send("test");
+    });
+    z.addEventListener("close", () => {
+      server.stop();
+    });
+
+    timeout = setTimeout(() => {
+      done(new Error("Did not close in time"));
+      server.stop(true);
+    }, 1000);
   });
 });

@@ -166,6 +166,12 @@ export default {
     page("bundler/plugins", "Plugins", {
       description: `Implement custom loaders and module resolution logic with Bun's plugin system.`,
     }),
+    page("bundler/executables", "Executables", {
+      description: "Compile a TypeScript or JavaScript file to a standalone cross-platform executable",
+    }),
+    page("bundler/migration", "Migration", {
+      description: `Guides for migrating from other bundlers to Bun.`,
+    }),
 
     divider("Test runner"),
     page("cli/test", "`bun test`", {
@@ -174,6 +180,12 @@ export default {
     page("test/writing", "Writing tests", {
       description:
         "Write your tests using Jest-like expect matchers, plus setup/teardown hooks, snapshot testing, and more",
+    }),
+    page("test/extending", "Extending the test runner", {
+      description: "Add lifecycle hooks to your tests that run before/after each test, or before/after all tests.",
+    }),
+    page("test/hot", "Watch mode", {
+      description: "Reload your tests automatically on change.",
     }),
 
     divider("Package runner"),
@@ -196,8 +208,11 @@ export default {
     page("ecosystem/hono", "Hono", {
       description: `Hono is an ultra-fast, Bun-friendly web framework designed for edge environments.`,
     }),
-    page("ecosystem/buchta", "Buchta", {
-      description: `Buchta is a Bun-native fullstack framework for Svelte and Preact apps.`,
+    // page("ecosystem/buchta", "Buchta", {
+    //   description: `Buchta is a Bun-native fullstack framework for Svelte and Preact apps.`,
+    // }),
+    page("ecosystem/stric", "Stric", {
+      description: `Stric is a minimalist, fast web framework for Bun.`,
     }),
     page("ecosystem/stric", "Stric", {
       description: `Stric is a minimalist, fast web framework for Bun.`,

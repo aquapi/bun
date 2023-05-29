@@ -22,6 +22,7 @@ import fs, {
   promises,
   unlinkSync,
   mkdtempSync,
+  mkdtemp,
   constants,
   Dirent,
   Stats,
@@ -33,7 +34,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ReadStream as ReadStream_, WriteStream as WriteStream_ } from "./export-from.js";
-import { ReadStream as ReadStreamStar_, WriteStream as WriteStreamStar_ } from "./export-*-from.js";
+import { ReadStream as ReadStreamStar_, WriteStream as WriteStreamStar_ } from "./export-star-from.js";
 
 const Buffer = globalThis.Buffer || Uint8Array;
 
@@ -45,6 +46,35 @@ if (!import.meta.dir) {
 function mkdirForce(path: string) {
   if (!existsSync(path)) mkdirSync(path, { recursive: true });
 }
+
+it("writeFileSync in append should not truncate the file", () => {
+  const path = join(tmpdir(), "writeFileSync-should-not-append-" + (Date.now() * 10000).toString(16));
+  var str = "";
+  writeFileSync(path, "---BEGIN---");
+  str += "---BEGIN---";
+  for (let i = 0; i < 10; i++) {
+    const line = "Line #" + i;
+    str += line;
+    writeFileSync(path, line, { flag: "a" });
+  }
+  expect(readFileSync(path, "utf8")).toBe(str);
+});
+
+it("writeFileSync NOT in append SHOULD truncate the file", () => {
+  const path = join(tmpdir(), "writeFileSync-should-not-append-" + (Date.now() * 10000).toString(16));
+
+  for (let options of [{ flag: "w" }, { flag: undefined }, {}, undefined]) {
+    writeFileSync(path, "---BEGIN---", options);
+    var str = "---BEGIN---";
+    expect(readFileSync(path, "utf8")).toBe(str);
+    for (let i = 0; i < 10; i++) {
+      const line = "Line #" + i;
+      str = line;
+      writeFileSync(path, line, options);
+      expect(readFileSync(path, "utf8")).toBe(str);
+    }
+  }
+});
 
 describe("copyFileSync", () => {
   it("should work for files < 128 KB", () => {
@@ -156,6 +186,22 @@ it("mkdtempSync() empty name", () => {
   expect(existsSync(tempdir + "/non-ascii-👍.txt")).toBe(false);
   rmdirSync(tempdir);
   expect(existsSync(tempdir)).toBe(false);
+});
+
+it("mkdtempSync() non-exist dir #2568", () => {
+  try {
+    expect(mkdtempSync("/tmp/hello/world")).toBeFalsy();
+  } catch (err: any) {
+    expect(err?.errno).toBe(-2);
+  }
+});
+
+it("mkdtemp() non-exist dir #2568", done => {
+  mkdtemp("/tmp/hello/world", (err, folder) => {
+    expect(err?.errno).toBe(-2);
+    expect(folder).toBeUndefined();
+    done();
+  });
 });
 
 it("readdirSync on import.meta.dir with trailing slash", () => {

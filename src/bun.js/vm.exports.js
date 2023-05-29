@@ -1,12 +1,8 @@
-// TODO: Implement vm module
-
-function hideFromStack(fns) {
-  for (const fn of fns) {
-    Object.defineProperty(fn, "name", {
-      value: "::bunternal::",
-    });
-  }
+const lazy = globalThis[Symbol.for("Bun.lazy")];
+if (!lazy || typeof lazy !== "function") {
+  throw new Error("Something went wrong while loading Bun. Expected 'Bun.lazy' to be defined.");
 }
+const vm = lazy("vm");
 
 class TODO extends Error {
   constructor(messageName) {
@@ -22,24 +18,12 @@ function notimpl(message) {
   throw new TODO(message);
 }
 
-function createContext() {
-  notimpl("createContext");
+const { createContext, isContext, Script, runInNewContext, runInThisContext } = vm;
+
+function runInContext(code, context, options) {
+  return new Script(code, options).runInContext(context);
 }
-function createScript() {
-  notimpl("createScript");
-}
-function runInContext() {
-  notimpl("runInContext");
-}
-function runInNewContext() {
-  notimpl("runInNewContext");
-}
-function runInThisContext() {
-  notimpl("runInThisContext");
-}
-function isContext() {
-  notimpl("isContext");
-}
+
 function compileFunction() {
   notimpl("compileFunction");
 }
@@ -47,15 +31,8 @@ function measureMemory() {
   notimpl("measureMemory");
 }
 
-class Script {
-  constructor() {
-    notimpl("Script");
-  }
-}
-
 const defaultObject = {
   createContext,
-  createScript,
   runInContext,
   runInNewContext,
   runInThisContext,
@@ -69,7 +46,6 @@ const defaultObject = {
 export {
   defaultObject as default,
   createContext,
-  createScript,
   runInContext,
   runInNewContext,
   runInThisContext,
@@ -78,17 +54,3 @@ export {
   measureMemory,
   Script,
 };
-
-hideFromStack([
-  TODO.prototype.constructor,
-  notimpl,
-  createContext,
-  createScript,
-  runInContext,
-  runInNewContext,
-  runInThisContext,
-  isContext,
-  compileFunction,
-  measureMemory,
-  Script.prototype.constructor,
-]);

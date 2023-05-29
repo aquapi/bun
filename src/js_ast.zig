@@ -578,7 +578,7 @@ pub const CharFreq = struct {
     const Vector = @Vector(64, i32);
     const Buffer = [64]i32;
 
-    freqs: Buffer align(@alignOf(Vector)) = undefined,
+    freqs: Buffer align(1) = undefined,
 
     const scan_big_chunk_size = 32;
     pub fn scan(this: *CharFreq, text: string, delta: i32) void {
@@ -592,7 +592,7 @@ pub const CharFreq = struct {
         }
     }
 
-    fn scanBig(out: *align(@alignOf(Vector)) Buffer, text: string, delta: i32) void {
+    fn scanBig(out: *align(1) Buffer, text: string, delta: i32) void {
         // https://zig.godbolt.org/z/P5dPojWGK
         var freqs = out.*;
         defer out.* = freqs;
@@ -625,7 +625,7 @@ pub const CharFreq = struct {
         freqs[63] = deltas['$'];
     }
 
-    fn scanSmall(out: *align(@alignOf(Vector)) [64]i32, text: string, delta: i32) void {
+    fn scanSmall(out: *align(1) Buffer, text: string, delta: i32) void {
         var freqs: [64]i32 = out.*;
         defer out.* = freqs;
 
@@ -857,8 +857,8 @@ pub const G = struct {
     };
 
     pub const Fn = struct {
-        name: ?LocRef,
-        open_parens_loc: logger.Loc,
+        name: ?LocRef = null,
+        open_parens_loc: logger.Loc = logger.Loc.Empty,
         args: []Arg = &([_]Arg{}),
         // This was originally nullable, but doing so I believe caused a miscompilation
         // Specifically, the body was always null.
@@ -1317,6 +1317,8 @@ pub const Symbol = struct {
         }
 
         pub fn followAll(symbols: *Map) void {
+            const trace = bun.tracy.traceNamed(@src(), "Symbols.followAll");
+            defer trace.end();
             for (symbols.symbols_for_source.slice()) |list| {
                 for (list.slice()) |*symbol| {
                     if (!symbol.hasLink()) continue;
@@ -1433,21 +1435,16 @@ pub const E = struct {
             return ExprNodeList.init(out[0 .. out.len - remain.len]);
         }
 
-        pub fn toJS(this: @This(), ctx: JSC.C.JSContextRef, exception: JSC.C.ExceptionRef) JSC.C.JSValueRef {
-            var stack = std.heap.stackFallback(32 * @sizeOf(ExprNodeList), JSC.getAllocator(ctx));
-            var allocator = stack.get();
-            var results = allocator.alloc(JSC.C.JSValueRef, this.items.len) catch {
-                return JSC.C.JSValueMakeUndefined(ctx);
-            };
-            defer if (stack.fixed_buffer_allocator.end_index >= stack.fixed_buffer_allocator.buffer.len - 1) allocator.free(results);
-
-            var i: usize = 0;
+        pub fn toJS(this: @This(), allocator: std.mem.Allocator, globalObject: *JSC.JSGlobalObject) ToJSError!JSC.JSValue {
             const items = this.items.slice();
-            while (i < results.len) : (i += 1) {
-                results[i] = items[i].toJS(ctx, exception);
+            var array = JSC.JSValue.createEmptyArray(globalObject, items.len);
+            array.protect();
+            defer array.unprotect();
+            for (items, 0..) |expr, j| {
+                array.putIndex(globalObject, @truncate(u32, j), try expr.data.toJS(allocator, globalObject));
             }
 
-            return JSC.C.JSObjectMakeArray(ctx, results.len, results.ptr, exception);
+            return array;
         }
     };
 
@@ -1695,8 +1692,8 @@ pub const E = struct {
     pub const Number = struct {
         value: f64,
 
-        const double_digit = [_]string{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100" };
-        const neg_double_digit = [_]string{ "-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9", "-11", "-12", "-13", "-14", "-15", "-16", "-17", "-18", "-19", "-20", "-21", "-22", "-23", "-24", "-25", "-26", "-27", "-28", "-29", "-30", "-31", "-32", "-33", "-34", "-35", "-36", "-37", "-38", "-39", "-40", "-41", "-42", "-43", "-44", "-45", "-46", "-47", "-48", "-49", "-50", "-51", "-52", "-53", "-54", "-55", "-56", "-57", "-58", "-59", "-60", "-61", "-62", "-63", "-64", "-65", "-66", "-67", "-68", "-69", "-70", "-71", "-72", "-73", "-74", "-75", "-76", "-77", "-78", "-79", "-80", "-81", "-82", "-83", "-84", "-85", "-86", "-87", "-88", "-89", "-90", "-91", "-92", "-93", "-94", "-95", "-96", "-97", "-98", "-99", "-100" };
+        const double_digit = [_]string{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100" };
+        const neg_double_digit = [_]string{ "-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9", "-10", "-11", "-12", "-13", "-14", "-15", "-16", "-17", "-18", "-19", "-20", "-21", "-22", "-23", "-24", "-25", "-26", "-27", "-28", "-29", "-30", "-31", "-32", "-33", "-34", "-35", "-36", "-37", "-38", "-39", "-40", "-41", "-42", "-43", "-44", "-45", "-46", "-47", "-48", "-49", "-50", "-51", "-52", "-53", "-54", "-55", "-56", "-57", "-58", "-59", "-60", "-61", "-62", "-63", "-64", "-65", "-66", "-67", "-68", "-69", "-70", "-71", "-72", "-73", "-74", "-75", "-76", "-77", "-78", "-79", "-80", "-81", "-82", "-83", "-84", "-85", "-86", "-87", "-88", "-89", "-90", "-91", "-92", "-93", "-94", "-95", "-96", "-97", "-98", "-99", "-100" };
 
         /// String concatenation with numbers is required by the TypeScript compiler for
         /// "constant expression" handling in enums. However, we don't want to introduce
@@ -1708,19 +1705,17 @@ pub const E = struct {
         }
 
         pub fn toStringFromF64Safe(value: f64, allocator: std.mem.Allocator) ?string {
-            if (value == @trunc(value)) {
+            if (value == @trunc(value) and (value < std.math.maxInt(i32) and value > std.math.minInt(i32))) {
                 const int_value = @floatToInt(i64, value);
                 const abs = @intCast(u64, std.math.absInt(int_value) catch return null);
                 if (abs < double_digit.len) {
-                    return if (value < 0)
+                    return if (int_value < 0)
                         neg_double_digit[abs]
                     else
                         double_digit[abs];
                 }
 
-                if (abs <= std.math.maxInt(i32)) {
-                    return std.fmt.allocPrint(allocator, "{d}", .{@intCast(i32, int_value)}) catch return null;
-                }
+                return std.fmt.allocPrint(allocator, "{d}", .{@intCast(i32, int_value)}) catch return null;
             }
 
             if (std.math.isNan(value)) {
@@ -1762,8 +1757,8 @@ pub const E = struct {
             return try std.json.stringify(self.value, opts, o);
         }
 
-        pub fn toJS(this: @This(), _: JSC.C.JSContextRef, _: JSC.C.ExceptionRef) JSC.C.JSValueRef {
-            return JSC.JSValue.jsNumber(this.value).asObjectRef();
+        pub fn toJS(this: @This()) JSC.JSValue {
+            return JSC.JSValue.jsNumber(this.value);
         }
     };
 
@@ -1776,7 +1771,7 @@ pub const E = struct {
             return try std.json.stringify(self.value, opts, o);
         }
 
-        pub fn toJS(_: @This(), _: JSC.C.JSContextRef, _: JSC.C.ExceptionRef) JSC.C.JSValueRef {
+        pub fn toJS(_: @This()) JSC.JSValue {
             // TODO:
             return JSC.JSValue.jsNumber(0);
         }
@@ -1838,6 +1833,22 @@ pub const E = struct {
 
         pub fn get(self: *const Object, key: string) ?Expr {
             return if (asProperty(self, key)) |query| query.expr else @as(?Expr, null);
+        }
+
+        pub fn toJS(this: *Object, allocator: std.mem.Allocator, globalObject: *JSC.JSGlobalObject) ToJSError!JSC.JSValue {
+            var obj = JSC.JSValue.createEmptyObject(globalObject, this.properties.len);
+            obj.protect();
+            defer obj.unprotect();
+            const props: []const G.Property = this.properties.slice();
+            for (props) |prop| {
+                if (prop.kind != .normal or prop.class_static_block != null or prop.key == null or prop.key.?.data != .e_string or prop.value == null) {
+                    return error.@"Cannot convert argument type to JS";
+                }
+                var key = prop.key.?.data.e_string.toZigString(allocator);
+                obj.put(globalObject, &key, try prop.value.?.toJS(allocator, globalObject));
+            }
+
+            return obj;
         }
 
         pub fn put(self: *Object, allocator: std.mem.Allocator, key: string, expr: Expr) !void {
@@ -2176,7 +2187,7 @@ pub const E = struct {
             return @ptrCast([*]const u16, @alignCast(@alignOf(u16), this.data.ptr))[0..this.data.len];
         }
 
-        pub fn resovleRopeIfNeeded(this: *String, allocator: std.mem.Allocator) void {
+        pub fn resolveRopeIfNeeded(this: *String, allocator: std.mem.Allocator) void {
             if (this.next == null or !this.isUTF8()) return;
             var str = this.next;
             var bytes = std.ArrayList(u8).initCapacity(allocator, this.rope_len) catch unreachable;
@@ -2191,7 +2202,7 @@ pub const E = struct {
         }
 
         pub fn slice(this: *String, allocator: std.mem.Allocator) []const u8 {
-            this.resovleRopeIfNeeded(allocator);
+            this.resolveRopeIfNeeded(allocator);
             return this.string(allocator) catch unreachable;
         }
 
@@ -2339,6 +2350,18 @@ pub const E = struct {
             }
         }
 
+        pub fn toJS(s: *String, allocator: std.mem.Allocator, globalObject: *JSC.JSGlobalObject) JSC.JSValue {
+            return s.toZigString(allocator).toValueGC(globalObject);
+        }
+
+        pub fn toZigString(s: *String, allocator: std.mem.Allocator) JSC.ZigString {
+            if (s.isUTF8()) {
+                return JSC.ZigString.fromUTF8(s.slice(allocator));
+            } else {
+                return JSC.ZigString.init16(s.slice16());
+            }
+        }
+
         pub fn jsonStringify(s: *const String, options: anytype, writer: anytype) !void {
             var buf = [_]u8{0} ** 4096;
             var i: usize = 0;
@@ -2358,13 +2381,23 @@ pub const E = struct {
     pub const TemplatePart = struct {
         value: ExprNodeIndex,
         tail_loc: logger.Loc,
-        tail: E.String,
+        tail: Template.Contents,
     };
 
     pub const Template = struct {
         tag: ?ExprNodeIndex = null,
-        head: E.String,
         parts: []TemplatePart = &([_]TemplatePart{}),
+        head: Contents,
+
+        pub const Contents = union(Tag) {
+            cooked: E.String,
+            raw: string,
+
+            const Tag = enum {
+                cooked,
+                raw,
+            };
+        };
 
         /// "`a${'b'}c`" => "`abc`"
         pub fn fold(
@@ -2372,7 +2405,7 @@ pub const E = struct {
             allocator: std.mem.Allocator,
             loc: logger.Loc,
         ) Expr {
-            if (this.tag != null or !this.head.isUTF8()) {
+            if (this.tag != null or (this.head == .cooked and !this.head.cooked.isUTF8())) {
                 // we only fold utf-8/ascii for now
                 return Expr{
                     .data = .{
@@ -2382,14 +2415,17 @@ pub const E = struct {
                 };
             }
 
+            std.debug.assert(this.head == .cooked);
+
             if (this.parts.len == 0) {
-                return Expr.init(E.String, this.head, loc);
+                return Expr.init(E.String, this.head.cooked, loc);
             }
 
             var parts = std.ArrayList(TemplatePart).initCapacity(allocator, this.parts.len) catch unreachable;
-            var head = Expr.init(E.String, this.head, loc);
+            var head = Expr.init(E.String, this.head.cooked, loc);
             for (this.parts) |part_| {
                 var part = part_;
+                std.debug.assert(part.tail == .cooked);
 
                 switch (part.value.data) {
                     .e_number => {
@@ -2412,27 +2448,28 @@ pub const E = struct {
                     else => {},
                 }
 
-                if (part.value.data == .e_string and part.tail.isUTF8() and part.value.data.e_string.isUTF8()) {
+                if (part.value.data == .e_string and part.tail.cooked.isUTF8() and part.value.data.e_string.isUTF8()) {
                     if (parts.items.len == 0) {
                         if (part.value.data.e_string.len() > 0) {
-                            head.data.e_string.push(part.value.data.e_string);
+                            head.data.e_string.push(Expr.init(E.String, part.value.data.e_string.*, logger.Loc.Empty).data.e_string);
                         }
 
-                        if (part.tail.len() > 0) {
-                            head.data.e_string.push(Expr.init(E.String, part.tail, part.tail_loc).data.e_string);
+                        if (part.tail.cooked.len() > 0) {
+                            head.data.e_string.push(Expr.init(E.String, part.tail.cooked, part.tail_loc).data.e_string);
                         }
 
                         continue;
                     } else {
                         var prev_part = &parts.items[parts.items.len - 1];
+                        std.debug.assert(prev_part.tail == .cooked);
 
-                        if (prev_part.tail.isUTF8()) {
+                        if (prev_part.tail.cooked.isUTF8()) {
                             if (part.value.data.e_string.len() > 0) {
-                                prev_part.tail.push(part.value.data.e_string);
+                                prev_part.tail.cooked.push(Expr.init(E.String, part.value.data.e_string.*, logger.Loc.Empty).data.e_string);
                             }
 
-                            if (part.tail.len() > 0) {
-                                prev_part.tail.push(Expr.init(E.String, part.tail, part.tail_loc).data.e_string);
+                            if (part.tail.cooked.len() > 0) {
+                                prev_part.tail.cooked.push(Expr.init(E.String, part.tail.cooked, part.tail_loc).data.e_string);
                             }
                         } else {
                             parts.appendAssumeCapacity(part);
@@ -2445,7 +2482,7 @@ pub const E = struct {
 
             if (parts.items.len == 0) {
                 parts.deinit();
-
+                head.data.e_string.resolveRopeIfNeeded(allocator);
                 return head;
             }
 
@@ -2454,7 +2491,7 @@ pub const E = struct {
                 E.Template{
                     .tag = null,
                     .parts = parts.items,
-                    .head = head.data.e_string.*,
+                    .head = .{ .cooked = head.data.e_string.* },
                 },
                 loc,
             );
@@ -2592,6 +2629,10 @@ pub const Stmt = struct {
 
     pub fn isSuperCall(self: Stmt) bool {
         return self.data == .s_expr and self.data.s_expr.value.data == .e_call and self.data.s_expr.value.data.e_call.target.data == .e_super;
+    }
+
+    pub fn isMissingExpr(self: Stmt) bool {
+        return self.data == .s_expr and self.data.s_expr.value.data == .e_missing;
     }
 
     pub fn empty() Stmt {
@@ -3072,8 +3113,8 @@ pub const Expr = struct {
         return false;
     }
 
-    pub fn toJS(this: Expr, ctx: JSC.C.JSContextRef, exception: JSC.C.ExceptionRef) JSC.C.JSValueRef {
-        return this.data.toJS(ctx, exception);
+    pub fn toJS(this: Expr, allocator: std.mem.Allocator, globalObject: *JSC.JSGlobalObject) ToJSError!JSC.JSValue {
+        return this.data.toJS(allocator, globalObject);
     }
 
     pub fn get(expr: *const Expr, name: string) ?Expr {
@@ -3597,7 +3638,6 @@ pub const Expr = struct {
                     // Sanity check: assert string is not a null ptr
                     if (st.data.len > 0 and st.isUTF8()) {
                         std.debug.assert(@ptrToInt(st.data.ptr) > 0);
-                        std.debug.assert(st.data[0] > 0);
                     }
                 }
                 return Expr{
@@ -3963,7 +4003,6 @@ pub const Expr = struct {
                     // Sanity check: assert string is not a null ptr
                     if (st.data.len > 0 and st.isUTF8()) {
                         std.debug.assert(@ptrToInt(st.data.ptr) > 0);
-                        std.debug.assert(st.data[0] > 0);
                     }
                 }
                 return Expr{
@@ -4058,6 +4097,10 @@ pub const Expr = struct {
                 @compileError("Invalid type passed to Expr.init: " ++ @typeName(Type));
             },
         }
+    }
+
+    pub fn isPrimitiveLiteral(this: Expr) bool {
+        return @as(Tag, this.data).isPrimitiveLiteral();
     }
 
     pub const Tag = enum(u6) {
@@ -5036,7 +5079,10 @@ pub const Expr = struct {
             };
         }
 
-        pub const Equality = struct { equal: bool = false, ok: bool = false };
+        pub const Equality = struct {
+            equal: bool = false,
+            ok: bool = false,
+        };
 
         // Returns "equal, ok". If "ok" is false, then nothing is known about the two
         // values. If "ok" is true, the equality or inequality of the two values is
@@ -5045,36 +5091,133 @@ pub const Expr = struct {
             left: Expr.Data,
             right: Expr.Data,
             allocator: std.mem.Allocator,
+            comptime kind: enum { loose, strict },
         ) Equality {
+            // https://dorey.github.io/JavaScript-Equality-Table/
             var equality = Equality{};
             switch (left) {
-                .e_null => {
-                    equality.equal = @as(Expr.Tag, right) == Expr.Tag.e_null;
-                    equality.ok = equality.equal;
-                },
-                .e_undefined => {
-                    equality.ok = @as(Expr.Tag, right) == Expr.Tag.e_undefined;
-                    equality.equal = equality.ok;
+                .e_null, .e_undefined => {
+                    const ok = switch (@as(Expr.Tag, right)) {
+                        .e_null, .e_undefined => true,
+                        else => @as(Expr.Tag, right).isPrimitiveLiteral(),
+                    };
+
+                    if (comptime kind == .loose) {
+                        return .{
+                            .equal = switch (@as(Expr.Tag, right)) {
+                                .e_null, .e_undefined => true,
+                                else => false,
+                            },
+                            .ok = ok,
+                        };
+                    }
+
+                    return .{
+                        .equal = @as(Tag, right) == @as(Tag, left),
+                        .ok = ok,
+                    };
                 },
                 .e_boolean => |l| {
-                    equality.ok = @as(Expr.Tag, right) == Expr.Tag.e_boolean;
-                    equality.equal = equality.ok and l.value == right.e_boolean.value;
+                    switch (right) {
+                        .e_boolean => {
+                            equality.ok = true;
+                            equality.equal = l.value == right.e_boolean.value;
+                        },
+                        .e_number => |num| {
+                            if (comptime kind == .strict) {
+                                // "true === 1" is false
+                                // "false === 0" is false
+                                return .{ .ok = true, .equal = false };
+                            }
+
+                            return .{
+                                .ok = true,
+                                .equal = if (l.value)
+                                    num.value == 1
+                                else
+                                    num.value == 0,
+                            };
+                        },
+                        .e_null, .e_undefined => {
+                            return .{ .ok = true, .equal = false };
+                        },
+                        else => {},
+                    }
                 },
                 .e_number => |l| {
-                    equality.ok = @as(Expr.Tag, right) == Expr.Tag.e_number;
-                    equality.equal = equality.ok and l.value == right.e_number.value;
+                    switch (right) {
+                        .e_number => |r| {
+                            return .{
+                                .ok = true,
+                                .equal = l.value == r.value,
+                            };
+                        },
+                        .e_boolean => |r| {
+                            if (comptime kind == .loose) {
+                                return .{
+                                    .ok = true,
+                                    // "1 == true" is true
+                                    // "0 == false" is true
+                                    .equal = if (r.value)
+                                        l.value == 1
+                                    else
+                                        l.value == 0,
+                                };
+                            }
+
+                            // "1 === true" is false
+                            // "0 === false" is false
+                            return .{ .ok = true, .equal = false };
+                        },
+                        .e_null, .e_undefined => {
+                            // "(not null or undefined) == undefined" is false
+                            return .{ .ok = true, .equal = false };
+                        },
+                        else => {},
+                    }
                 },
                 .e_big_int => |l| {
-                    equality.ok = @as(Expr.Tag, right) == Expr.Tag.e_big_int;
-                    equality.equal = equality.ok and strings.eql(l.value, right.e_big_int.value);
+                    if (right == .e_big_int) {
+                        equality.ok = true;
+                        equality.equal = strings.eql(l.value, l.value);
+                    } else {
+                        equality.ok = switch (right) {
+                            .e_null, .e_undefined => true,
+                            else => false,
+                        };
+                        equality.equal = false;
+                    }
                 },
                 .e_string => |l| {
-                    equality.ok = @as(Expr.Tag, right) == Expr.Tag.e_string;
-                    if (equality.ok) {
-                        var r = right.e_string;
-                        r.resovleRopeIfNeeded(allocator);
-                        l.resovleRopeIfNeeded(allocator);
-                        equality.equal = r.eql(E.String, l);
+                    switch (right) {
+                        .e_string => |r| {
+                            equality.ok = true;
+                            r.resolveRopeIfNeeded(allocator);
+                            l.resolveRopeIfNeeded(allocator);
+                            equality.equal = r.eql(E.String, l);
+                        },
+                        .e_null, .e_undefined => {
+                            equality.ok = true;
+                            equality.equal = false;
+                        },
+                        .e_number => |r| {
+                            if (comptime kind == .loose) {
+                                if (r.value == 0 or r.value == 1) {
+                                    equality.ok = true;
+                                    equality.equal = if (r.value == 0)
+                                        l.eqlComptime("0")
+                                    else if (r.value == 1)
+                                        l.eqlComptime("1")
+                                    else
+                                        unreachable;
+                                }
+                            } else {
+                                equality.ok = true;
+                                equality.equal = false;
+                            }
+                        },
+
+                        else => {},
                     }
                 },
                 else => {},
@@ -5083,18 +5226,35 @@ pub const Expr = struct {
             return equality;
         }
 
-        pub fn toJS(this: Data, ctx: JSC.C.JSContextRef, exception: JSC.C.ExceptionRef) JSC.C.JSValueRef {
+        pub fn toJS(this: Data, allocator: std.mem.Allocator, globalObject: *JSC.JSGlobalObject) ToJSError!JSC.JSValue {
             return switch (this) {
-                .e_array => |e| e.toJS(ctx, exception),
-                .e_null => |e| e.toJS(ctx, exception),
-                .e_undefined => |e| e.toJS(ctx, exception),
-                .e_object => |e| e.toJS(ctx, exception),
-                .e_boolean => |e| e.toJS(ctx, exception),
-                .e_number => |e| e.toJS(ctx, exception),
-                .e_big_int => |e| e.toJS(ctx, exception),
-                .e_string => |e| e.toJS(ctx, exception),
+                .e_array => |e| e.toJS(allocator, globalObject),
+                .e_object => |e| e.toJS(allocator, globalObject),
+                .e_string => |e| e.toJS(allocator, globalObject),
+                .e_null => JSC.JSValue.null,
+                .e_undefined => JSC.JSValue.undefined,
+                .e_boolean => |boolean| if (boolean.value)
+                    JSC.JSValue.true
+                else
+                    JSC.JSValue.false,
+                .e_number => |e| e.toJS(),
+                // .e_big_int => |e| e.toJS(ctx, exception),
+
+                .e_identifier,
+                .e_import_identifier,
+                .inline_identifier,
+                .e_private_identifier,
+                .e_commonjs_export_identifier,
+                => error.@"Cannot convert identifier to JS. Try a statically-known value",
+
+                // brk: {
+                //     // var node = try allocator.create(Macro.JSNode);
+                //     // node.* = Macro.JSNode.initExpr(Expr{ .data = this, .loc = logger.Loc.Empty });
+                //     // break :brk JSC.JSValue.c(Macro.JSNode.Class.make(globalObject, node));
+                // },
+
                 else => {
-                    return JSC.C.JSValueMakeUndefined(ctx);
+                    return error.@"Cannot convert argument type to JS";
                 },
             };
         }
@@ -5198,7 +5358,11 @@ pub const EnumValue = struct {
 };
 
 pub const S = struct {
-    pub const Block = struct { stmts: StmtNodeList };
+    pub const Block = struct {
+        stmts: StmtNodeList,
+        close_brace_loc: logger.Loc = logger.Loc.Empty,
+    };
+
     pub const SExpr = struct {
         value: ExprNodeIndex,
 
@@ -5402,6 +5566,7 @@ pub const Catch = struct {
     loc: logger.Loc,
     binding: ?BindingNodeIndex = null,
     body: StmtNodeList,
+    body_loc: logger.Loc,
 };
 
 pub const Finally = struct {
@@ -5720,9 +5885,9 @@ pub const Ast = struct {
     uses_exports_ref: bool = false,
     uses_module_ref: bool = false,
     uses_require_ref: bool = false,
-    exports_kind: ExportsKind = ExportsKind.none,
 
-    bundle_export_ref: ?Ref = null,
+    force_cjs_to_esm: bool = false,
+    exports_kind: ExportsKind = ExportsKind.none,
 
     // This is a list of ES6 features. They are ranges instead of booleans so
     // that they can be used in log messages. Check to see if "Len > 0".
@@ -5748,8 +5913,6 @@ pub const Ast = struct {
     require_ref: Ref = Ref.None,
 
     bun_plugin: BunPlugin = .{},
-
-    bundle_namespace_ref: ?Ref = null,
 
     prepend_part: ?Part = null,
 
@@ -5809,6 +5972,195 @@ pub const Ast = struct {
     }
 };
 
+/// Like Ast but slimmer and for bundling only.
+///
+/// On Linux, the hottest function in the bundler is:
+/// src.multi_array_list.MultiArrayList(src.js_ast.Ast).ensureTotalCapacity
+/// https://share.firefox.dev/3NNlRKt
+///
+/// So we make a slimmer version of Ast for bundling that doesn't allocate as much memory
+pub const BundledAst = struct {
+    approximate_newline_count: u32 = 0,
+    nested_scope_slot_counts: SlotCounts = SlotCounts{},
+    externals: []u32 = &[_]u32{},
+
+    exports_kind: ExportsKind = ExportsKind.none,
+
+    /// These are stored at the AST level instead of on individual AST nodes so
+    /// they can be manipulated efficiently without a full AST traversal
+    import_records: ImportRecord.List = .{},
+
+    hashbang: string = "",
+    directive: string = "",
+    url_for_css: string = "",
+    parts: Part.List = Part.List{},
+    // This list may be mutated later, so we should store the capacity
+    symbols: Symbol.List = Symbol.List{},
+    module_scope: Scope = Scope{},
+    char_freq: CharFreq = undefined,
+    exports_ref: Ref = Ref.None,
+    module_ref: Ref = Ref.None,
+    wrapper_ref: Ref = Ref.None,
+    require_ref: Ref = Ref.None,
+
+    // These are used when bundling. They are filled in during the parser pass
+    // since we already have to traverse the AST then anyway and the parser pass
+    // is conveniently fully parallelized.
+    named_imports: NamedImports = NamedImports.init(bun.failing_allocator),
+    named_exports: NamedExports = NamedExports.init(bun.failing_allocator),
+    export_star_import_records: []u32 = &([_]u32{}),
+
+    allocator: std.mem.Allocator,
+    top_level_symbols_to_parts: TopLevelSymbolToParts = .{},
+
+    commonjs_named_exports: CommonJSNamedExports = .{},
+
+    redirect_import_record_index: u32 = std.math.maxInt(u32),
+
+    /// Only populated when bundling
+    target: bun.options.Target = .browser,
+
+    const_values: ConstValuesMap = .{},
+
+    flags: BundledAst.Flags = .{},
+
+    pub const NamedImports = Ast.NamedImports;
+    pub const NamedExports = Ast.NamedExports;
+    pub const TopLevelSymbolToParts = Ast.TopLevelSymbolToParts;
+    pub const CommonJSNamedExports = Ast.CommonJSNamedExports;
+    pub const ConstValuesMap = Ast.ConstValuesMap;
+
+    pub const Flags = packed struct {
+        // This is a list of CommonJS features. When a file uses CommonJS features,
+        // it's not a candidate for "flat bundling" and must be wrapped in its own
+        // closure.
+        uses_exports_ref: bool = false,
+        uses_module_ref: bool = false,
+        // uses_require_ref: bool = false,
+
+        uses_export_keyword: bool = false,
+
+        has_char_freq: bool = false,
+        force_cjs_to_esm: bool = false,
+        has_lazy_export: bool = false,
+    };
+
+    pub const empty = BundledAst.init(Ast.empty);
+
+    pub inline fn uses_exports_ref(this: *const BundledAst) bool {
+        return this.flags.uses_exports_ref;
+    }
+    pub inline fn uses_module_ref(this: *const BundledAst) bool {
+        return this.flags.uses_module_ref;
+    }
+    // pub inline fn uses_require_ref(this: *const BundledAst) bool {
+    //     return this.flags.uses_require_ref;
+    // }
+
+    pub fn toAST(this: *const BundledAst) Ast {
+        return .{
+            .approximate_newline_count = this.approximate_newline_count,
+            .nested_scope_slot_counts = this.nested_scope_slot_counts,
+            .externals = this.externals,
+
+            .exports_kind = this.exports_kind,
+
+            .import_records = this.import_records,
+
+            .hashbang = this.hashbang,
+            .directive = this.directive,
+            // .url_for_css = this.url_for_css,
+            .parts = this.parts,
+            // This list may be mutated later, so we should store the capacity
+            .symbols = this.symbols,
+            .module_scope = this.module_scope,
+            .char_freq = if (this.flags.has_char_freq) this.char_freq else null,
+            .exports_ref = this.exports_ref,
+            .module_ref = this.module_ref,
+            .wrapper_ref = this.wrapper_ref,
+            .require_ref = this.require_ref,
+
+            // These are used when bundling. They are filled in during the parser pass
+            // since we already have to traverse the AST then anyway and the parser pass
+            // is conveniently fully parallelized.
+            .named_imports = this.named_imports,
+            .named_exports = this.named_exports,
+            .export_star_import_records = this.export_star_import_records,
+
+            .allocator = this.allocator,
+            .top_level_symbols_to_parts = this.top_level_symbols_to_parts,
+
+            .commonjs_named_exports = this.commonjs_named_exports,
+
+            .redirect_import_record_index = this.redirect_import_record_index,
+
+            .target = this.target,
+
+            .const_values = this.const_values,
+
+            .uses_exports_ref = this.flags.uses_exports_ref,
+            .uses_module_ref = this.flags.uses_module_ref,
+            // .uses_require_ref = ast.uses_require_ref,
+            .export_keyword = .{ .len = if (this.flags.uses_export_keyword) 1 else 0, .loc = .{} },
+            .force_cjs_to_esm = this.flags.force_cjs_to_esm,
+            .has_lazy_export = this.flags.has_lazy_export,
+        };
+    }
+
+    pub fn init(ast: Ast) BundledAst {
+        return .{
+            .approximate_newline_count = @truncate(u32, ast.approximate_newline_count),
+            .nested_scope_slot_counts = ast.nested_scope_slot_counts,
+            .externals = ast.externals,
+
+            .exports_kind = ast.exports_kind,
+
+            .import_records = ast.import_records,
+
+            .hashbang = ast.hashbang,
+            .directive = ast.directive orelse "",
+            // .url_for_css = ast.url_for_css orelse "",
+            .parts = ast.parts,
+            // This list may be mutated later, so we should store the capacity
+            .symbols = ast.symbols,
+            .module_scope = ast.module_scope,
+            .char_freq = ast.char_freq orelse undefined,
+            .exports_ref = ast.exports_ref,
+            .module_ref = ast.module_ref,
+            .wrapper_ref = ast.wrapper_ref,
+            .require_ref = ast.require_ref,
+
+            // These are used when bundling. They are filled in during the parser pass
+            // since we already have to traverse the AST then anyway and the parser pass
+            // is conveniently fully parallelized.
+            .named_imports = ast.named_imports,
+            .named_exports = ast.named_exports,
+            .export_star_import_records = ast.export_star_import_records,
+
+            .allocator = ast.allocator,
+            .top_level_symbols_to_parts = ast.top_level_symbols_to_parts,
+
+            .commonjs_named_exports = ast.commonjs_named_exports,
+
+            .redirect_import_record_index = ast.redirect_import_record_index orelse std.math.maxInt(u32),
+
+            .target = ast.target,
+
+            .const_values = ast.const_values,
+
+            .flags = .{
+                .uses_exports_ref = ast.uses_exports_ref,
+                .uses_module_ref = ast.uses_module_ref,
+                // .uses_require_ref = ast.uses_require_ref,
+                .uses_export_keyword = ast.export_keyword.len > 0,
+                .has_char_freq = ast.char_freq != null,
+                .force_cjs_to_esm = ast.force_cjs_to_esm,
+                .has_lazy_export = ast.has_lazy_export,
+            },
+        };
+    }
+};
+
 pub const Span = struct {
     text: string = "",
     range: logger.Range = .{},
@@ -5845,12 +6197,27 @@ pub const ExportsKind = enum {
     // module.
     esm_with_dynamic_fallback_from_cjs,
 
+    const dynamic = std.EnumSet(ExportsKind).init(.{
+        .esm_with_dynamic_fallback = true,
+        .esm_with_dynamic_fallback_from_cjs = true,
+        .cjs = true,
+    });
+
+    const with_dynamic_fallback = std.EnumSet(ExportsKind).init(.{
+        .esm_with_dynamic_fallback = true,
+        .esm_with_dynamic_fallback_from_cjs = true,
+    });
+
     pub fn isDynamic(self: ExportsKind) bool {
-        return self == .esm_with_dynamic_fallback or self == .cjs;
+        return dynamic.contains(self);
     }
 
     pub fn jsonStringify(self: @This(), opts: anytype, o: anytype) !void {
         return try std.json.stringify(@tagName(self), opts, o);
+    }
+
+    pub fn isESMWithDynamicFallback(self: ExportsKind) bool {
+        return with_dynamic_fallback.contains(self);
     }
 };
 
@@ -6017,6 +6384,7 @@ pub const Part = struct {
         bun_test,
         dead_due_to_inlining,
         commonjs_named_export,
+        import_to_convert_from_require,
     };
 
     pub const SymbolUseMap = std.ArrayHashMapUnmanaged(Ref, Symbol.Use, RefHashCtx, false);
@@ -6247,6 +6615,7 @@ pub const Scope = struct {
         label,
         class_name,
         class_body,
+        catch_binding,
 
         // The scopes below stop hoisted variables from extending into parent scopes
         entry, // This is a module, TypeScript enum, or TypeScript namespace
@@ -6773,7 +7142,10 @@ pub const Macro = struct {
                         return toStringValue(this, ctx, str.*);
                     },
                     .e_template => |template| {
-                        const str = template.head;
+                        const str = switch (template.head) {
+                            .cooked => |cooked| cooked,
+                            .raw => |raw| E.String.init(raw),
+                        };
 
                         if (str.isBlank()) {
                             return JSC.ZigString.init("").toValue(ctx.ptr()).asRef();
@@ -6816,8 +7188,10 @@ pub const Macro = struct {
                         return JSBindings.toStringValue(this, ctx, str.*);
                     },
                     .e_template => |template| {
-                        return JSBindings.toStringValue(this, ctx, template.head);
-                        // return JSBindings.toTemplatePrimitive(this, ctx, template.*);
+                        return switch (template.head) {
+                            .cooked => |cooked| JSBindings.toStringValue(this, ctx, cooked),
+                            .raw => |raw| JSBindings.toStringValue(this, ctx, E.String.init(raw)),
+                        };
                     },
                     .e_number => |number| {
                         return JSBindings.toNumberValue(this, number);
@@ -8612,7 +8986,7 @@ pub const Macro = struct {
                         while (i < count) {
                             var nextArg = writer.eatArg() orelse return false;
                             if (js.JSValueIsArray(writer.ctx, nextArg.asRef())) {
-                                const extras = @truncate(u32, nextArg.getLengthOfArray(writer.ctx.ptr()));
+                                const extras = @truncate(u32, nextArg.getLength(writer.ctx.ptr()));
                                 count += std.math.max(@truncate(@TypeOf(count), extras), 1) - 1;
                                 items.ensureUnusedCapacity(extras) catch unreachable;
                                 items.expandToCapacity();
@@ -8993,7 +9367,7 @@ pub const Macro = struct {
                 .allocator = JSCBase.getAllocator(ctx),
                 .exception = exception,
                 .args_value = args_value,
-                .args_len = @truncate(u32, args_value.getLengthOfArray(ctx.ptr())),
+                .args_len = @truncate(u32, args_value.getLength(ctx.ptr())),
                 .args_i = 0,
                 .errored = false,
             };
@@ -9208,7 +9582,14 @@ pub const Macro = struct {
             resolver.opts.transform_options.node_modules_bundle_path = null;
             resolver.opts.transform_options.node_modules_bundle_path_server = null;
             defer resolver.opts.transform_options = old_transform_options;
-            var _vm = try JavaScript.VirtualMachine.init(default_allocator, resolver.opts.transform_options, null, log, env);
+            var _vm = try JavaScript.VirtualMachine.init(
+                default_allocator,
+                resolver.opts.transform_options,
+                null,
+                log,
+                env,
+                false,
+            );
 
             _vm.enableMacroMode();
             _vm.eventLoop().ensureWaker();
@@ -9244,7 +9625,7 @@ pub const Macro = struct {
         threadlocal var args_buf: [3]js.JSObjectRef = undefined;
         threadlocal var expr_nodes_buf: [1]JSNode = undefined;
         threadlocal var exception_holder: Zig.ZigException.Holder = undefined;
-        pub const MacroError = error{MacroFailed};
+        pub const MacroError = error{ MacroFailed, OutOfMemory } || ToJSError;
 
         pub fn NewRun(comptime Visitor: type) type {
             return struct {
@@ -9268,6 +9649,7 @@ pub const Macro = struct {
                     function_name: string,
                     caller: Expr,
                     args_count: usize,
+                    args_ptr: [*]JSC.JSValue,
                     source: *const logger.Source,
                     id: i32,
                     visitor: Visitor,
@@ -9280,7 +9662,7 @@ pub const Macro = struct {
                         macro_callback,
                         null,
                         args_count,
-                        &args_buf,
+                        @ptrCast([*]js.JSObjectRef, args_ptr),
                     );
 
                     var runner = Run{
@@ -9368,6 +9750,9 @@ pub const Macro = struct {
                                 } else if (value.as(JSC.WebCore.Blob)) |resp| {
                                     blob_ = resp.*;
                                     blob_.?.allocator = null;
+                                } else if (value.as(JSC.ResolveMessage) != null or value.as(JSC.BuildMessage) != null) {
+                                    this.macro.vm.runErrorHandler(value, null);
+                                    return error.MacroFailed;
                                 }
                             } else {
                                 var private_data = JSCBase.JSPrivateDataPtr.from(JSC.C.JSObjectGetPrivate(value.asObjectRef()).?);
@@ -9379,10 +9764,6 @@ pub const Macro = struct {
                                         node.visited = true;
                                         node.updateSymbolsMap(Visitor, this.visitor);
                                         return _entry.value_ptr.*;
-                                    },
-                                    .ResolveError, .BuildError => {
-                                        this.macro.vm.runErrorHandler(value, null);
-                                        return error.MacroFailed;
                                     },
 
                                     else => {},
@@ -9596,13 +9977,47 @@ pub const Macro = struct {
             if (comptime Environment.isDebug) Output.prettyln("<r><d>[macro]<r> call <d><b>{s}<r>", .{function_name});
 
             exception_holder = Zig.ZigException.Holder.init();
-            expr_nodes_buf[0] = JSNode.initExpr(caller);
-            args_buf[0] = JSNode.Class.make(
-                macro.vm.global,
-                &expr_nodes_buf[0],
-            );
-            args_buf[1] = if (javascript_object.isEmpty()) null else javascript_object.asObjectRef();
-            args_buf[2] = null;
+            var js_args: []JSC.JSValue = &.{};
+            defer {
+                for (js_args[0 .. js_args.len - @as(usize, @boolToInt(!javascript_object.isEmpty()))]) |arg| {
+                    arg.unprotect();
+                }
+
+                allocator.free(js_args);
+            }
+
+            var globalObject = JSC.VirtualMachine.get().global;
+
+            switch (caller.data) {
+                .e_call => |call| {
+                    const call_args: []Expr = call.args.slice();
+                    js_args = try allocator.alloc(JSC.JSValue, call_args.len + @as(usize, @boolToInt(!javascript_object.isEmpty())));
+
+                    for (call_args, js_args[0..call_args.len]) |in, *out| {
+                        const value = try in.toJS(
+                            allocator,
+                            globalObject,
+                        );
+                        value.protect();
+                        out.* = value;
+                    }
+                },
+                .e_template => {
+                    @panic("TODO: support template literals in macros");
+                },
+                else => {
+                    @panic("Unexpected caller type");
+                },
+            }
+
+            if (!javascript_object.isEmpty()) {
+                if (js_args.len == 0) {
+                    js_args = try allocator.alloc(JSC.JSValue, 1);
+                }
+
+                js_args[js_args.len - 1] = javascript_object;
+            }
+
             const Run = NewRun(Visitor);
 
             const CallFunction = @TypeOf(Run.runAsync);
@@ -9630,7 +10045,8 @@ pub const Macro = struct {
                 allocator,
                 function_name,
                 caller,
-                2 + @as(usize, @boolToInt(!javascript_object.isEmpty())),
+                js_args.len,
+                js_args.ptr,
                 source,
                 id,
                 visitor,
@@ -9642,7 +10058,9 @@ pub const Macro = struct {
 };
 
 pub const ASTMemoryAllocator = struct {
-    stack_allocator: std.heap.StackFallbackAllocator(8096) = undefined,
+    stack_allocator: std.heap.StackFallbackAllocator(
+        if (std.mem.page_size > 8096) 8096 else std.mem.page_size,
+    ) = undefined,
     bump_allocator: std.mem.Allocator = undefined,
     allocator: std.mem.Allocator,
     previous: ?*ASTMemoryAllocator = null,
@@ -9959,3 +10377,10 @@ pub const GlobalStoreHandle = struct {
 // Stmt               | 192
 // STry               | 384
 // -- ESBuild bit sizes
+
+const ToJSError = error{
+    @"Cannot convert argument type to JS",
+    @"Cannot convert identifier to JS. Try a statically-known value",
+    MacroError,
+    OutOfMemory,
+};

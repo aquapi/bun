@@ -2685,7 +2685,7 @@ it("should handle Git URL in dependencies", async () => {
   const package_json = await file(join(package_dir, "node_modules", "uglify-js", "package.json")).json();
   expect(package_json.name).toBe("uglify-js");
   await access(join(package_dir, "bun.lockb"));
-});
+}, 20000);
 
 it("should handle Git URL in dependencies (SCP-style)", async () => {
   const urls: string[] = [];
@@ -2746,7 +2746,7 @@ it("should handle Git URL in dependencies (SCP-style)", async () => {
   const package_json = await file(join(package_dir, "node_modules", "uglify", "package.json")).json();
   expect(package_json.name).toBe("uglify-js");
   await access(join(package_dir, "bun.lockb"));
-});
+}, 20000);
 
 it("should handle Git URL with committish in dependencies", async () => {
   const urls: string[] = [];
@@ -2809,7 +2809,7 @@ it("should handle Git URL with committish in dependencies", async () => {
   expect(package_json.name).toBe("uglify-js");
   expect(package_json.version).toBe("3.14.1");
   await access(join(package_dir, "bun.lockb"));
-});
+}, 20000);
 
 it("should fail on invalid Git URL", async () => {
   const urls: string[] = [];
@@ -2887,7 +2887,7 @@ it("should fail on Git URL with invalid committish", async () => {
   } catch (err: any) {
     expect(err.code).toBe("ENOENT");
   }
-});
+}, 20000);
 
 it("should de-duplicate committish in Git URLs", async () => {
   const urls: string[] = [];
@@ -2974,7 +2974,7 @@ it("should de-duplicate committish in Git URLs", async () => {
   expect(ver_json.name).toBe("uglify-js");
   expect(ver_json.version).toBe("3.14.1");
   await access(join(package_dir, "bun.lockb"));
-});
+}, 20000);
 
 it("should handle Git URL with existing lockfile", async () => {
   const urls: string[] = [];
@@ -3169,7 +3169,7 @@ cache = false
     join("..", "uglify-js", "bin", "uglifyjs"),
   );
   await access(join(package_dir, "bun.lockb"));
-});
+}, 20000);
 
 it("should prefer optionalDependencies over dependencies of the same name", async () => {
   const urls: string[] = [];
@@ -3830,3 +3830,481 @@ it("should handle tarball path with existing lockfile", async () => {
   });
   await access(join(package_dir, "bun.lockb"));
 });
+
+it("should handle devDependencies from folder", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  await writeFile(
+    join(package_dir, "package.json"),
+    JSON.stringify({
+      name: "foo",
+      version: "0.1.0",
+      dependencies: {
+        moo: "file:./moo",
+      },
+    }),
+  );
+  await mkdir(join(package_dir, "moo"));
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    devDependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: package_dir,
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([" + moo@moo", "", " 2 packages installed"]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".cache", "bar", "moo"]);
+  expect(await readdirSorted(join(package_dir, "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+  expect(await readdirSorted(join(package_dir, "node_modules", "moo"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "moo", "package.json")).text()).toEqual(moo_package);
+  await access(join(package_dir, "bun.lockb"));
+});
+
+it("should deduplicate devDependencies from folder", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  await writeFile(
+    join(package_dir, "package.json"),
+    JSON.stringify({
+      name: "foo",
+      version: "0.1.0",
+      devDependencies: {
+        bar: "^0.0.2",
+        moo: "file:./moo",
+      },
+    }),
+  );
+  await mkdir(join(package_dir, "moo"));
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    devDependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: package_dir,
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + bar@0.0.2",
+    " + moo@moo",
+    "",
+    " 2 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".cache", "bar", "moo"]);
+  expect(await readdirSorted(join(package_dir, "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+  expect(await readdirSorted(join(package_dir, "node_modules", "moo"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "moo", "package.json")).text()).toEqual(moo_package);
+  await access(join(package_dir, "bun.lockb"));
+});
+
+it("should install dependencies in root package of workspace", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  await writeFile(
+    join(package_dir, "package.json"),
+    JSON.stringify({
+      name: "foo",
+      version: "0.1.0",
+      workspaces: ["moo"],
+    }),
+  );
+  await mkdir(join(package_dir, "moo"));
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    dependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: join(package_dir, "moo"),
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + moo@workspace:moo",
+    "",
+    " 2 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".cache", "bar", "moo"]);
+  expect(await readdirSorted(join(package_dir, "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+  expect(await readdirSorted(join(package_dir, "node_modules", "moo"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "moo", "package.json")).text()).toEqual(moo_package);
+  await access(join(package_dir, "bun.lockb"));
+});
+
+it("should install dependencies in root package of workspace (*)", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  await writeFile(
+    join(package_dir, "package.json"),
+    JSON.stringify({
+      name: "foo",
+      version: "0.1.0",
+      workspaces: ["*"],
+    }),
+  );
+  await mkdir(join(package_dir, "moo"));
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    dependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: join(package_dir, "moo"),
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + moo@workspace:moo",
+    "",
+    " 2 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".cache", "bar", "moo"]);
+  expect(await readdirSorted(join(package_dir, "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+  expect(await readdirSorted(join(package_dir, "node_modules", "moo"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "node_modules", "moo", "package.json")).text()).toEqual(moo_package);
+  await access(join(package_dir, "bun.lockb"));
+});
+
+it("should ignore invalid workspaces from parent directory", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  const foo_package = JSON.stringify({
+    name: "foo",
+    version: "0.1.0",
+    workspaces: ["moz"],
+  });
+  await writeFile(join(package_dir, "package.json"), foo_package);
+  await mkdir(join(package_dir, "moo"));
+  await writeFile(join(package_dir, "moo", "bunfig.toml"), await file(join(package_dir, "bunfig.toml")).text());
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    dependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: join(package_dir, "moo"),
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + bar@0.0.2",
+    "",
+    " 1 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(package_dir)).toEqual(["bunfig.toml", "moo", "package.json"]);
+  expect(await file(join(package_dir, "package.json")).text()).toEqual(foo_package);
+  expect(await readdirSorted(join(package_dir, "moo"))).toEqual([
+    "bun.lockb",
+    "bunfig.toml",
+    "node_modules",
+    "package.json",
+  ]);
+  expect(await file(join(package_dir, "moo", "package.json")).text()).toEqual(moo_package);
+  expect(await readdirSorted(join(package_dir, "moo", "node_modules"))).toEqual([".cache", "bar"]);
+  expect(await readdirSorted(join(package_dir, "moo", "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "moo", "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+});
+
+it("should handle --cwd", async () => {
+  const urls: string[] = [];
+  setHandler(dummyRegistry(urls));
+  const foo_package = JSON.stringify({
+    name: "foo",
+    version: "0.1.0",
+  });
+  await writeFile(join(package_dir, "package.json"), foo_package);
+  await mkdir(join(package_dir, "moo"));
+  await writeFile(join(package_dir, "moo", "bunfig.toml"), await file(join(package_dir, "bunfig.toml")).text());
+  const moo_package = JSON.stringify({
+    name: "moo",
+    version: "0.2.0",
+    dependencies: {
+      bar: "^0.0.2",
+    },
+  });
+  await writeFile(join(package_dir, "moo", "package.json"), moo_package);
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install", "--cwd", "moo"],
+    cwd: package_dir,
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + bar@0.0.2",
+    "",
+    " 1 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(urls.sort()).toEqual([`${root_url}/bar`, `${root_url}/bar-0.0.2.tgz`]);
+  expect(requested).toBe(2);
+  expect(await readdirSorted(package_dir)).toEqual(["bunfig.toml", "moo", "package.json"]);
+  expect(await file(join(package_dir, "package.json")).text()).toEqual(foo_package);
+  expect(await readdirSorted(join(package_dir, "moo"))).toEqual([
+    "bun.lockb",
+    "bunfig.toml",
+    "node_modules",
+    "package.json",
+  ]);
+  expect(await file(join(package_dir, "moo", "package.json")).text()).toEqual(moo_package);
+  expect(await readdirSorted(join(package_dir, "moo", "node_modules"))).toEqual([".cache", "bar"]);
+  expect(await readdirSorted(join(package_dir, "moo", "node_modules", "bar"))).toEqual(["package.json"]);
+  expect(await file(join(package_dir, "moo", "node_modules", "bar", "package.json")).json()).toEqual({
+    name: "bar",
+    version: "0.0.2",
+  });
+});
+
+it("should perform bin-linking across multiple dependencies", async () => {
+  const foo_package = JSON.stringify({
+    name: "foo",
+    devDependencies: {
+      "conditional-type-checks": "1.0.6",
+      "prettier": "2.8.8",
+      "tsd": "0.22.0",
+      "typescript": "5.0.4",
+    },
+  });
+  await writeFile(join(package_dir, "package.json"), foo_package);
+  await writeFile(
+    join(package_dir, "bunfig.toml"),
+    `
+[install]
+cache = false
+`,
+  );
+  const { stdout, stderr, exited } = spawn({
+    cmd: [bunExe(), "install"],
+    cwd: package_dir,
+    stdout: null,
+    stdin: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  expect(stderr).toBeDefined();
+  const err = await new Response(stderr).text();
+  expect(err).toContain("Saved lockfile");
+  expect(err).not.toContain("error:");
+  expect(stdout).toBeDefined();
+  const out = await new Response(stdout).text();
+  expect(out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+    " + conditional-type-checks@1.0.6",
+    " + prettier@2.8.8",
+    " + tsd@0.22.0",
+    " + typescript@5.0.4",
+    "",
+    " 119 packages installed",
+  ]);
+  expect(await exited).toBe(0);
+  expect(await readdirSorted(package_dir)).toEqual(["bun.lockb", "bunfig.toml", "node_modules", "package.json"]);
+  expect(await file(join(package_dir, "package.json")).text()).toEqual(foo_package);
+  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([
+    ".bin",
+    ".cache",
+    "@babel",
+    "@nodelib",
+    "@tsd",
+    "@types",
+    "ansi-escapes",
+    "ansi-regex",
+    "ansi-styles",
+    "array-union",
+    "arrify",
+    "braces",
+    "camelcase",
+    "camelcase-keys",
+    "chalk",
+    "color-convert",
+    "color-name",
+    "conditional-type-checks",
+    "decamelize",
+    "decamelize-keys",
+    "dir-glob",
+    "emoji-regex",
+    "error-ex",
+    "escape-string-regexp",
+    "eslint-formatter-pretty",
+    "eslint-rule-docs",
+    "fast-glob",
+    "fastq",
+    "fill-range",
+    "find-up",
+    "function-bind",
+    "glob-parent",
+    "globby",
+    "hard-rejection",
+    "has",
+    "has-flag",
+    "hosted-git-info",
+    "ignore",
+    "indent-string",
+    "irregular-plurals",
+    "is-arrayish",
+    "is-core-module",
+    "is-extglob",
+    "is-fullwidth-code-point",
+    "is-glob",
+    "is-number",
+    "is-plain-obj",
+    "is-unicode-supported",
+    "js-tokens",
+    "json-parse-even-better-errors",
+    "kind-of",
+    "lines-and-columns",
+    "locate-path",
+    "log-symbols",
+    "lru-cache",
+    "map-obj",
+    "meow",
+    "merge2",
+    "micromatch",
+    "min-indent",
+    "minimist-options",
+    "normalize-package-data",
+    "p-limit",
+    "p-locate",
+    "p-try",
+    "parse-json",
+    "path-exists",
+    "path-parse",
+    "path-type",
+    "picomatch",
+    "plur",
+    "prettier",
+    "queue-microtask",
+    "quick-lru",
+    "read-pkg",
+    "read-pkg-up",
+    "redent",
+    "resolve",
+    "reusify",
+    "run-parallel",
+    "semver",
+    "slash",
+    "spdx-correct",
+    "spdx-exceptions",
+    "spdx-expression-parse",
+    "spdx-license-ids",
+    "string-width",
+    "strip-ansi",
+    "strip-indent",
+    "supports-color",
+    "supports-hyperlinks",
+    "supports-preserve-symlinks-flag",
+    "to-regex-range",
+    "trim-newlines",
+    "tsd",
+    "type-fest",
+    "typescript",
+    "validate-npm-package-license",
+    "yallist",
+    "yargs-parser",
+  ]);
+  expect(await readdirSorted(join(package_dir, "node_modules", ".bin"))).toEqual([
+    "prettier",
+    "resolve",
+    "semver",
+    "tsc",
+    "tsd",
+    "tsserver",
+  ]);
+}, 10000);

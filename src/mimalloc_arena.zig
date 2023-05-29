@@ -226,11 +226,21 @@ pub const Arena = struct {
         return mimalloc.mi_malloc_usable_size(ptr);
     }
 
-    fn alloc(arena: *anyopaque, len: usize, ptr_align: u8, _: usize) ?[*]u8 {
+    fn alloc(arena: *anyopaque, len: usize, log2_align: u8, _: usize) ?[*]u8 {
         var this = bun.cast(*mimalloc.Heap, arena);
         // if (comptime Environment.allow_assert)
         //     ArenaRegistry.assert(.{ .heap = this });
-        return alignedAlloc(this, len, ptr_align);
+        if (comptime FeatureFlags.alignment_tweak) {
+            return alignedAlloc(this, len, log2_align);
+        }
+
+        const alignment = @as(usize, 1) << @intCast(Allocator.Log2Align, log2_align);
+
+        return alignedAlloc(
+            this,
+            len,
+            alignment,
+        );
     }
 
     fn resize(_: *anyopaque, buf: []u8, _: u8, new_len: usize, _: usize) bool {

@@ -49,9 +49,8 @@ void BundlerPlugin::NamespaceList::append(JSC::VM& vm, JSC::RegExp* filter, Stri
 
     Yarr::RegularExpression regex(
         StringView(filter->pattern()),
-        filter->flags().contains(Yarr::Flags::IgnoreCase) ? Yarr::TextCaseSensitivity::TextCaseInsensitive : Yarr::TextCaseSensitivity::TextCaseInsensitive,
-        filter->multiline() ? Yarr::MultilineMode::MultilineEnabled : Yarr::MultilineMode::MultilineDisabled,
-        filter->eitherUnicode() ? Yarr::UnicodeMode::UnicodeAwareMode : Yarr::UnicodeMode::UnicodeUnawareMode);
+        filter->flags());
+
     nsGroup->append(WTFMove(regex));
 }
 
@@ -375,7 +374,8 @@ extern "C" Bun::JSBundlerPlugin* JSBundlerPlugin__create(Zig::GlobalObject* glob
 
 extern "C" EncodedJSValue JSBundlerPlugin__runSetupFunction(
     Bun::JSBundlerPlugin* plugin,
-    EncodedJSValue encodedSetupFunction)
+    EncodedJSValue encodedSetupFunction,
+    EncodedJSValue encodedConfig)
 {
     auto& vm = plugin->vm();
     auto scope = DECLARE_CATCH_SCOPE(vm);
@@ -390,6 +390,7 @@ extern "C" EncodedJSValue JSBundlerPlugin__runSetupFunction(
 
     MarkedArgumentBuffer arguments;
     arguments.append(JSValue::decode(encodedSetupFunction));
+    arguments.append(JSValue::decode(encodedConfig));
     auto* lexicalGlobalObject = jsCast<JSFunction*>(JSValue::decode(encodedSetupFunction))->globalObject();
 
     auto result = JSC::call(lexicalGlobalObject, setupFunction, callData, plugin, arguments);

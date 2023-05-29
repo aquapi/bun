@@ -1,4 +1,7 @@
-type BinaryType = "arraybuffer" | "blob";
+/**
+ * "blob" is not supported yet
+ */
+type BinaryType = "arraybuffer" | "nodebuffer" | "blob";
 type Transferable = ArrayBuffer;
 type MessageEventSource = undefined;
 type Encoding = "utf-8" | "windows-1252" | "utf-16";
@@ -252,13 +255,13 @@ interface ImportMeta {
   /**
    * Resolve a module ID the same as if you imported it
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    */
   resolve(moduleId: string): Promise<string>;
   /**
    * Resolve a `moduleId` as though it were imported from `parent`
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    */
   // tslint:disable-next-line:unified-signatures
   resolve(moduleId: string, parent: string): Promise<string>;
@@ -652,7 +655,7 @@ declare class Blob implements BlobInterface {
   formData(): Promise<FormData>;
 
   type: string;
-  size: number;
+  readonly size: number;
 }
 
 interface ResponseInit {
@@ -1803,7 +1806,7 @@ declare var CustomEvent: {
 interface WebSocketEventMap {
   close: CloseEvent;
   error: Event;
-  message: MessageEvent;
+  message: MessageEvent<Buffer | ArrayBuffer | string>;
   open: Event;
 }
 
@@ -1812,7 +1815,9 @@ interface WebSocket extends EventTarget {
   /**
    * Returns a string that indicates how binary data from the WebSocket object is exposed to scripts:
    *
-   * Can be set, to change how binary data is returned. The default is "blob".
+   * Can be set, to change how binary data is returned. The default is `"arraybuffer"`.
+   *
+   * Unlike in browsers, you can also set `binaryType` to `"nodebuffer"` to receive a {@link Buffer} object.
    */
   binaryType: BinaryType;
   /**
@@ -1825,7 +1830,9 @@ interface WebSocket extends EventTarget {
   readonly extensions: string;
   onclose: ((this: WebSocket, ev: CloseEvent) => any) | null;
   onerror: ((this: WebSocket, ev: Event) => any) | null;
-  onmessage: ((this: WebSocket, ev: MessageEvent) => any) | null;
+  onmessage:
+    | ((this: WebSocket, ev: WebSocketEventMap["message"]) => any)
+    | null;
   onopen: ((this: WebSocket, ev: Event) => any) | null;
   /** Returns the subprotocol selected by the server, if any. It can be used in conjunction with the array form of the constructor's second argument to perform subprotocol negotiation. */
   readonly protocol: string;
@@ -2080,7 +2087,6 @@ type EventListenerOrEventListenerObject = EventListener | EventListenerObject;
  * "/node_modules.server.bun".
  *
  * Bun may inject additional imports into your code. This usually has a `bun:` prefix.
- *
  */
 declare var Loader: {
   /**
@@ -2103,25 +2109,34 @@ declare var Loader: {
    *
    * Virtual modules and JS polyfills are embedded in bun's binary. They don't
    * point to anywhere in your local filesystem.
-   *
-   *
    */
   registry: Map<
     string,
     {
+      key: string;
       /**
        * This refers to the state the ESM module is in
        *
        * TODO: make an enum for this number
-       *
-       *
        */
       state: number;
-      dependencies: string[];
+      fetch: Promise<any>;
+      instantiate: Promise<any>;
+      satisfy: Promise<any>;
+      dependencies: Array<
+        (typeof Loader)["registry"] extends Map<any, infer V> ? V : any
+      >;
       /**
        * Your application will probably crash if you mess with this.
        */
-      module: any;
+      module: {
+        dependenciesMap: (typeof Loader)["registry"];
+      };
+      linkError?: any;
+      linkSucceeded: boolean;
+      evaluated: boolean;
+      then?: any;
+      isAsync: boolean;
     }
   >;
   /**
@@ -2245,6 +2260,7 @@ declare var ReadableStreamDefaultController: {
 interface ReadableStreamDefaultReader<R = any>
   extends ReadableStreamGenericReader {
   read(): Promise<ReadableStreamDefaultReadResult<R>>;
+  readMany(): Promise<ReadableStreamDefaultReadValueResult<R>>;
   releaseLock(): void;
 }
 
@@ -2864,12 +2880,12 @@ interface Position {
   offset: number;
 }
 
-interface ResolveError {
+declare class ResolveMessage {
+  readonly name: "ResolveMessage";
   readonly position: Position | null;
   readonly code: string;
   readonly message: string;
   readonly referrer: string;
-  readonly name: string;
   readonly specifier: string;
   readonly importKind:
     | "entry_point"
@@ -2882,23 +2898,27 @@ interface ResolveError {
     | "at_conditional"
     | "url"
     | "internal";
+  readonly level: "error" | "warning" | "info" | "debug" | "verbose";
 
   toString(): string;
 }
 
-declare var ResolveError: {
-  readonly protoype: ResolveError;
-};
-
-interface BuildError {
+declare class BuildMessage {
+  readonly name: "BuildMessage";
   readonly position: Position | null;
   readonly message: string;
-  readonly name: string;
+  readonly level: "error" | "warning" | "info" | "debug" | "verbose";
 }
 
-declare var BuildError: {
-  readonly protoype: BuildError;
-};
+/**
+ * @deprecated Renamed to `BuildMessage`
+ */
+declare var BuildError: typeof BuildMessage;
+
+/**
+ * @deprecated Renamed to `ResolveMessage`
+ */
+declare var ResolveError: typeof ResolveMessage;
 
 // Declare "static" methods in Error
 interface ErrorConstructor {

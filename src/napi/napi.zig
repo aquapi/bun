@@ -571,7 +571,7 @@ pub export fn napi_has_element(env: napi_env, object: napi_value, index: c_uint,
         return .array_expected;
     }
 
-    result.* = object.getLengthOfArray(env) > index;
+    result.* = object.getLength(env) > index;
     return .ok;
 }
 pub export fn napi_get_element(env: napi_env, object: napi_value, index: u32, result: *napi_value) napi_status {
@@ -595,7 +595,7 @@ pub export fn napi_get_array_length(env: napi_env, value: napi_value, result: [*
         return .array_expected;
     }
 
-    result.* = @truncate(u32, value.getLengthOfArray(env));
+    result.* = @truncate(u32, value.getLength(env));
     return .ok;
 }
 pub export fn napi_strict_equals(env: napi_env, lhs: napi_value, rhs: napi_value, result: *bool) napi_status {
@@ -1150,7 +1150,7 @@ pub export fn napi_fatal_error(location_ptr: ?[*:0]const u8, location_len: usize
     bun.Global.panic("napi: {s}", .{message});
 }
 pub export fn napi_create_buffer(env: napi_env, length: usize, data: ?**anyopaque, result: *napi_value) napi_status {
-    log("napi_create_buffer", .{});
+    log("napi_create_buffer: {d}", .{length});
     var buffer = JSC.JSValue.createBufferFromLength(env, length);
     if (length > 0) {
         if (data) |ptr| {
@@ -1161,8 +1161,8 @@ pub export fn napi_create_buffer(env: napi_env, length: usize, data: ?**anyopaqu
     return .ok;
 }
 pub export fn napi_create_external_buffer(env: napi_env, length: usize, data: ?*anyopaque, finalize_cb: napi_finalize, finalize_hint: ?*anyopaque, result: *napi_value) napi_status {
-    log("napi_create_external_buffer", .{});
-    var buf = JSC.ExternalBuffer.create(finalize_hint, @ptrCast([*]u8, data.?)[0..length], env, finalize_cb, env.bunVM().allocator) catch {
+    log("napi_create_external_buffer: {d}", .{length});
+    var buf = JSC.ExternalBuffer.create(finalize_hint, @ptrCast([*]u8, data.?)[0..length], env, finalize_cb, bun.default_allocator) catch {
         return genericFailure();
     };
 
@@ -1170,7 +1170,7 @@ pub export fn napi_create_external_buffer(env: napi_env, length: usize, data: ?*
     return .ok;
 }
 pub export fn napi_create_buffer_copy(env: napi_env, length: usize, data: [*]u8, result_data: ?*?*anyopaque, result: *napi_value) napi_status {
-    log("napi_create_buffer_copy", .{});
+    log("napi_create_buffer_copy: {d}", .{length});
     var buffer = JSC.JSValue.createBufferFromLength(env, length);
     if (buffer.asArrayBuffer(env)) |array_buf| {
         if (length > 0) {

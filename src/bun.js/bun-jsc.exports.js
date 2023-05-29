@@ -1,8 +1,11 @@
 const jsc = globalThis[Symbol.for("Bun.lazy")]("bun:jsc");
 
 export const callerSourceOrigin = jsc.callerSourceOrigin;
-export const describe = jsc.describe;
-export const describeArray = jsc.describeArray;
+export const jscDescribe = jsc.describe;
+export const jscDescribeArray = jsc.describeArray;
+/** Too easy to confuse with test describe */
+export const describe = jscDescribe;
+export const describeArray = jscDescribeArray;
 export const drainMicrotasks = jsc.drainMicrotasks;
 export const edenGC = jsc.edenGC;
 export const fullGC = jsc.fullGC;
@@ -28,3 +31,5 @@ export const getProtectedObjects = jsc.getProtectedObjects;
 export const generateHeapSnapshotForDebugging = jsc.generateHeapSnapshotForDebugging;
 export const profile = jsc.profile;
 export default jsc;
+export const setTimeZone = jsc.setTimeZone;
+export const setTimezone = setTimeZone;

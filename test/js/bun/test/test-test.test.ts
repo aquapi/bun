@@ -1,11 +1,13 @@
 // @ts-nocheck
 import { spawn, spawnSync } from "bun";
-import { describe, expect, it, test } from "bun:test";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test } from "bun:test";
+import { mkdirSync, realpathSync, rmSync, writeFileSync, copyFileSync } from "fs";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { bunEnv, bunExe } from "harness";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+
+const tmp = realpathSync(tmpdir());
 
 it("shouldn't crash when async test runner callback throws", async () => {
   const code = `
@@ -13,7 +15,7 @@ it("shouldn't crash when async test runner callback throws", async () => {
     await 1;
     throw "##123##";
   });
- 
+
   afterEach(async () => {
     await 1;
     console.error("#[Test passed successfully]");
@@ -1763,6 +1765,52 @@ test("toHaveLength()", () => {
   expect("123").not.toHaveLength(-0);
 });
 
+test("toHaveLength() extended", () => {
+  // Headers
+  expect(new Headers()).toHaveLength(0);
+  expect(new Headers({ a: "1" })).toHaveLength(1);
+
+  // FormData
+  const form = new FormData();
+  expect(form).toHaveLength(0);
+  form.append("a", "1");
+  expect(form).toHaveLength(1);
+
+  // URLSearchParams
+  expect(new URLSearchParams()).toHaveLength(0);
+  expect(new URLSearchParams("a=1")).toHaveLength(1);
+  expect(new URLSearchParams([["a", "1"]])).toHaveLength(1);
+
+  // files
+  const thisFile = Bun.file(import.meta.path);
+  const thisFileSize = thisFile.size;
+
+  expect(thisFile).toHaveLength(thisFileSize);
+  expect(thisFile).toHaveLength(Bun.file(import.meta.path).size);
+
+  // empty file should have length 0
+  writeFileSync("/tmp/empty.txt", "");
+  expect(Bun.file("/tmp/empty.txt")).toHaveLength(0);
+
+  // if a file doesn't exist, it should throw (not return 0 size)
+  expect(() => expect(Bun.file("/does-not-exist/file.txt")).toHaveLength(0)).toThrow();
+
+  // Blob
+  expect(new Blob([1, 2, 3])).toHaveLength(3);
+  expect(new Blob()).toHaveLength(0);
+
+  // Set
+  expect(new Set()).toHaveLength(0);
+  expect(new Set([1, 2, 3])).toHaveLength(3);
+
+  // Map
+  expect(new Map()).toHaveLength(0);
+  expect(new Map([["a", 1]])).toHaveLength(1);
+
+  // WeakMap
+  expect(new WeakMap([[globalThis, 1]])).toHaveLength(1);
+});
+
 test("toContain()", () => {
   const s1 = new String("123");
   expect(s1).not.toContain("12");
@@ -1796,6 +1844,84 @@ test("toContain()", () => {
   expect([]).not.toContain([]);
 });
 
+test("toBeEven()", () => {
+  expect(1).not.toBeEven();
+  expect(2).toBeEven();
+  expect(3).not.toBeEven();
+  expect(3.1).not.toBeEven();
+  expect(2.1).not.toBeEven();
+  expect(4).toBeEven();
+  expect(5).not.toBeEven();
+  expect(6).toBeEven();
+  expect(0).toBeEven();
+  expect(-8).toBeEven();
+  expect(-0).toBeEven();
+  expect(NaN).not.toBeEven();
+  expect([]).not.toBeEven();
+  expect([1, 2]).not.toBeEven();
+  expect({}).not.toBeEven();
+  expect(() => {}).not.toBeEven();
+  expect("").not.toBeEven();
+  expect("string").not.toBeEven();
+  expect(undefined).not.toBeEven();
+  expect(Math.floor(Date.now() / 1000) * 2).toBeEven(); // Slight fuzz by using timestamp times 2
+  expect(Math.floor(Date.now() / 1000) * 4 - 1).not.toBeEven();
+  expect(4.0e1).toBeEven();
+  expect(6.2e1).toBeEven();
+  expect(6.3e1).not.toBeEven();
+  expect(6.33e1).not.toBeEven();
+  expect(3.3e-1).not.toBeEven(); //throw
+  expect(0.3).not.toBeEven(); //throw
+  expect(0.4).not.toBeEven();
+  expect(1).not.toBeEven();
+  expect(0).toBeEven();
+  expect(2.0).toBeEven();
+  expect(NaN).not.toBeEven();
+  expect(2n).toBeEven(); // BigInt at this time not supported in jest-extended
+  expect(3n).not.toBeEven();
+  expect(9007199254740990).toBeEven(); // manual typical max safe -1 // not int?
+  expect(9007199254740990n).toBeEven(); // manual typical max safe -1 as bigint
+  expect(Number.MAX_SAFE_INTEGER - 1).toBeEven(); // not int?
+  expect(Number.MAX_SAFE_INTEGER).not.toBeEven();
+  expect(BigInt(Number.MAX_SAFE_INTEGER) - 1n).toBeEven();
+  expect(BigInt(Number.MAX_SAFE_INTEGER)).not.toBeEven();
+  expect(BigInt(Number.MAX_VALUE - 1)).toBeEven();
+  expect(Number.MIN_SAFE_INTEGER + 1).toBeEven(); // not int?
+  expect(Number.MIN_SAFE_INTEGER).not.toBeEven();
+  expect(BigInt(Number.MIN_SAFE_INTEGER) + 1n).toBeEven();
+  expect(BigInt(Number.MIN_SAFE_INTEGER)).not.toBeEven();
+  expect(4 / Number.NEGATIVE_INFINITY).toBeEven(); // as in IEEE-754: + / -inf => neg zero
+  expect(5 / Number.NEGATIVE_INFINITY).toBeEven();
+  expect(-7 / Number.NEGATIVE_INFINITY).toBeEven(); // as in IEEE-754: - / -inf => zero
+  expect(-8 / Number.NEGATIVE_INFINITY).toBeEven();
+  expect(new WebAssembly.Global({ value: "i32", mutable: false }, 4).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "i32", mutable: false }, 3).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "i32", mutable: true }, 2).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "i32", mutable: true }, 1).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "i64", mutable: true }, -9223372036854775808n).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "i64", mutable: false }, -9223372036854775808n).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "i64", mutable: true }, 9223372036854775807n).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "i64", mutable: false }, 9223372036854775807n).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 42.0).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 42.0).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 42.0).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 42.0).value).toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 43.0).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 43.0).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 43.0).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 43.0).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 4.3).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 4.3).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 4.3).value).not.toBeEven();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 4.3).value).not.toBeEven();
+  // did not seem to support SIMD v128 type yet (which is not in W3C specs for JS but is a valid global type)
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:false}, -170141183460469231731687303715884105728n).value).toBeEven();
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:true}, -170141183460469231731687303715884105728n).value).toBeEven();
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:true}, 170141183460469231731687303715884105727n).value).not.toBeEven();
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:false}, 170141183460469231731687303715884105727n).value).not.toBeEven();
+  // FUTURE: with uintv128: expect(new WebAssembly.Global({value:'v128', mutable:false}, 340282366920938463463374607431768211456n).value).toThrow();
+});
+
 test("toBeTruthy()", () => {
   expect("test").toBeTruthy();
   expect(true).toBeTruthy();
@@ -1804,12 +1930,15 @@ test("toBeTruthy()", () => {
   expect([]).toBeTruthy();
   expect(() => {}).toBeTruthy();
   // expect(() => {}).not.toBeTruthy();
+  expect(0.5).toBeTruthy();
+  expect(new Map()).toBeTruthy();
 
   expect("").not.toBeTruthy();
   expect(0).not.toBeTruthy();
   expect(-0).not.toBeTruthy();
   expect(NaN).not.toBeTruthy();
   expect(0n).not.toBeTruthy();
+  expect(0.0e1).not.toBeTruthy();
   expect(false).not.toBeTruthy();
   expect(null).not.toBeTruthy();
   expect(undefined).not.toBeTruthy();
@@ -2310,6 +2439,84 @@ test("toBeLessThanOrEqual()", () => {
   expect(1).toBeLessThanOrEqual(BigInt(Number.MAX_SAFE_INTEGER));
 });
 
+test("toBeOdd()", () => {
+  expect(1).toBeOdd();
+  expect(2).not.toBeOdd();
+  expect(3).toBeOdd();
+  expect(3.1).not.toBeOdd();
+  expect(2.1).not.toBeOdd();
+  expect(4).not.toBeOdd();
+  expect(5).toBeOdd();
+  expect(6).not.toBeOdd();
+  expect(0).not.toBeOdd();
+  expect(-8).not.toBeOdd();
+  expect(-0).not.toBeOdd();
+  expect(NaN).not.toBeOdd();
+  expect([]).not.toBeOdd();
+  // SHOULD FAIL: expect([]).toBeOdd();
+  expect([1, 2]).not.toBeOdd();
+  expect({}).not.toBeOdd();
+  expect(() => {}).not.toBeOdd();
+  expect("").not.toBeOdd();
+  expect("string").not.toBeOdd();
+  expect(undefined).not.toBeOdd();
+  expect(Math.floor(Date.now() / 1000) * 2 - 1).toBeOdd(); // Slight fuzz by using timestamp times 2
+  expect(Math.floor(Date.now() / 1000) * 4 - 1).toBeOdd();
+  expect(4.0e1).not.toBeOdd();
+  expect(6.2e1).not.toBeOdd();
+  expect(6.3e1).toBeOdd();
+  expect(6.33e1).not.toBeOdd();
+  expect(3.2e-3).not.toBeOdd();
+  expect(0.3).not.toBeOdd();
+  expect(0.4).not.toBeOdd();
+  expect(1).toBeOdd();
+  expect(0).not.toBeOdd();
+  expect(2.0).not.toBeOdd();
+  expect(NaN).not.toBeOdd();
+  expect(2n).not.toBeOdd(); // BigInt at this time not supported in jest-extended
+  expect(3n).toBeOdd();
+  expect(9007199254740990).not.toBeOdd(); // manual typical max safe -1
+  expect(9007199254740991).toBeOdd();
+  expect(9007199254740990n).not.toBeOdd(); // manual typical max safe -1 as bigint
+  expect(9007199254740991n).toBeOdd();
+  expect(Number.MAX_SAFE_INTEGER - 1).not.toBeOdd();
+  expect(Number.MAX_SAFE_INTEGER).toBeOdd();
+  expect(BigInt(Number.MAX_SAFE_INTEGER) - 1n).not.toBeOdd();
+  expect(BigInt(Number.MAX_SAFE_INTEGER)).toBeOdd();
+  expect(Number.MIN_SAFE_INTEGER + 1).not.toBeOdd();
+  expect(Number.MIN_SAFE_INTEGER).toBeOdd();
+  expect(BigInt(Number.MIN_SAFE_INTEGER) + 1n).not.toBeOdd();
+  expect(BigInt(Number.MIN_SAFE_INTEGER)).toBeOdd();
+  expect(4 / Number.NEGATIVE_INFINITY).not.toBeOdd(); // in IEEE-754: + / -inf => neg zero
+  expect(5 / Number.NEGATIVE_INFINITY).not.toBeOdd();
+  expect(-7 / Number.NEGATIVE_INFINITY).not.toBeOdd(); // in IEEE-754: - / -inf => zero
+  expect(-8 / Number.NEGATIVE_INFINITY).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "i32", mutable: false }, 4).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "i32", mutable: false }, 3).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "i32", mutable: true }, 2).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "i32", mutable: true }, 1).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "i64", mutable: true }, -9223372036854775808n).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "i64", mutable: false }, -9223372036854775808n).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "i64", mutable: true }, 9223372036854775807n).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "i64", mutable: false }, 9223372036854775807n).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 42.0).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 42.0).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 42.0).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 42.0).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 43.0).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 43.0).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 43.0).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 43.0).value).toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: true }, 4.3).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f32", mutable: false }, 4.3).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: true }, 4.3).value).not.toBeOdd();
+  expect(new WebAssembly.Global({ value: "f64", mutable: false }, 4.3).value).not.toBeOdd();
+  // did not seem to support SIMD v128 type yet
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:false}, 42).value).not.toBeOdd();
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:true}, 42).value).not.toBeOdd();
+  // FUTURE: expect(new WebAssembly.Global({value:'v128', mutable:true}, 43).value).toBeOdd();
+});
+
 try {
   test("test this doesnt crash");
 } catch (e) {}
@@ -2401,18 +2608,19 @@ test("test async exceptions fail tests", () => {
   });
 
   `;
-
-  rmSync("/tmp/test-throwing-bun/test-throwing-eventemitter.test.js", {
+  const dir = join(tmpdir(), "test-throwing-bun");
+  const filepath = join(dir, "test-throwing-eventemitter.test.js");
+  rmSync(filepath, {
     force: true,
   });
 
   try {
-    mkdirSync("/tmp/test-throwing-bun", { recursive: true });
+    mkdirSync(dir, { recursive: true });
   } catch (e) {}
-  writeFileSync("/tmp/test-throwing-bun/test-throwing-eventemitter.test.js", code);
+  writeFileSync(filepath, code);
 
-  const { stderr, exitCode } = spawnSync([bunExe(), "wiptest", "test-throwing-eventemitter"], {
-    cwd: realpathSync("/tmp/test-throwing-bun"),
+  const { stderr, exitCode } = spawnSync([bunExe(), "test", "test-throwing-eventemitter"], {
+    cwd: realpathSync(dir),
     env: bunEnv,
   });
 
@@ -2452,4 +2660,262 @@ it("should return non-zero exit code for invalid syntax", async () => {
   } finally {
     await rm(test_dir, { force: true, recursive: true });
   }
+});
+
+describe("skip test inner", () => {
+  it("should pass", () => {
+    expect(2 + 2).toBe(4);
+  });
+
+  describe.skip("skip", () => {
+    it("should throw", () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+
+    describe("skip non-skipped inner", () => {
+      it("should throw", () => {
+        throw new Error("This should not throw. `.skip` is broken");
+      });
+    });
+  });
+});
+
+describe.skip("skip test outer", () => {
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+
+  describe("skip non-skipped inner", () => {
+    it("should throw", () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+  });
+
+  describe("skip nested non-skipped inner", () => {
+    describe("skip", () => {
+      it("should throw", () => {
+        throw new Error("This should not throw. `.skip` is broken");
+      });
+    });
+  });
+});
+
+describe("skip test inner 2", () => {
+  it("should pass", () => {
+    expect(2 + 2).toBe(4);
+  });
+
+  describe.skip("skip", () => {
+    it("should throw", () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+  });
+});
+
+describe.skip("skip beforeEach", () => {
+  beforeEach(() => {
+    throw new Error("should not run `beforeEach`");
+  });
+
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+});
+
+describe("nested beforeEach and afterEach", () => {
+  let value = 0;
+
+  beforeEach(() => {
+    value += 1;
+  });
+
+  afterEach(() => {
+    value += 1;
+  });
+
+  describe("runs beforeEach", () => {
+    it("should update value", () => {
+      expect(value).toBe(1);
+    });
+  });
+
+  describe.skip("skips", () => {
+    it("should throw", async () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+  });
+
+  describe.skip("skips async", () => {
+    it("should throw", async () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+  });
+
+  describe("runs beforeEach again", () => {
+    it("should have value as 3", () => {
+      expect(value).toBe(3);
+    });
+  });
+});
+
+describe.skip("skip afterEach", () => {
+  afterEach(() => {
+    throw new Error("should not run `afterEach`");
+  });
+
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+});
+
+describe.skip("skip beforeAll", () => {
+  beforeAll(() => {
+    throw new Error("should not run `beforeAll`");
+  });
+
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+});
+
+describe.skip("skip afterAll", () => {
+  afterAll(() => {
+    throw new Error("should not run `afterAll`");
+  });
+
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+});
+
+// no labels
+
+describe.skip(() => {
+  it("should throw", () => {
+    throw new Error("This should not throw. `.skip` is broken");
+  });
+});
+
+describe(() => {
+  it("should pass", () => {
+    expect(2 + 2).toBe(4);
+  });
+
+  describe.skip("skip", () => {
+    it("should throw", () => {
+      throw new Error("This should not throw. `.skip` is broken");
+    });
+  });
+});
+
+it("test.todo", () => {
+  const path = join(tmp, "todo-test.test.js");
+  copyFileSync(join(import.meta.dir, "todo-test-fixture.js"), path);
+  const { stdout, stderr, exitCode } = spawnSync({
+    cmd: [bunExe(), "test", path],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: bunEnv,
+    cwd: realpathSync(dirname(path)),
+  });
+  const err = stderr!.toString();
+  expect(err).toContain("this test is marked as todo but passes");
+  expect(err).toContain("this async error is shown");
+  expect(err).toContain("this async error with an await is shown");
+  expect(err).toContain("this error is shown");
+  expect(err).toContain("4 todo");
+  expect(err).toContain("0 pass");
+  expect(err).toContain("3 fail");
+  expect(exitCode).toBe(1);
+});
+
+it("test.todo doesnt cause exit code 1", () => {
+  const path = join(tmp, "todo-test.test.js");
+  copyFileSync(join(import.meta.dir, "todo-test-fixture-2.js"), path);
+  const { stdout, stderr, exitCode } = spawnSync({
+    cmd: [bunExe(), "test", path],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: bunEnv,
+    cwd: realpathSync(dirname(path)),
+  });
+
+  const err = stderr!.toString();
+  expect(exitCode).toBe(0);
+});
+
+it("test timeouts when expected", () => {
+  const path = join(tmp, "test-timeout.test.js");
+  copyFileSync(join(import.meta.dir, "timeout-test-fixture.js"), path);
+  const { stdout, stderr, exited } = spawnSync({
+    cmd: [bunExe(), "test", path],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: bunEnv,
+    cwd: realpathSync(dirname(path)),
+  });
+
+  const err = stderr!.toString();
+  expect(err).toContain("timed out after 10ms");
+  expect(err).not.toContain("unreachable code");
+});
+
+it("expect().toEqual() on objects with property indices doesn't print undefined", () => {
+  const path = join(tmp, "test-fixture-diff-indexed-properties.test.js");
+  copyFileSync(join(import.meta.dir, "test-fixture-diff-indexed-properties.js"), path);
+  const { stderr } = spawnSync({
+    cmd: [bunExe(), "test", path],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: bunEnv,
+    cwd: realpathSync(dirname(path)),
+  });
+
+  let err = stderr!.toString();
+  err = err.substring(err.indexOf("expect(received).toEqual(expected)"), err.indexOf("at "));
+
+  expect(err).toMatchSnapshot();
+  expect(err).not.toContain("undefined");
+});
+
+it("test --preload supports global lifecycle hooks", () => {
+  const preloadedPath = join(tmp, "test-fixture-preload-global-lifecycle-hook-preloaded.js");
+  const path = join(tmp, "test-fixture-preload-global-lifecycle-hook-test.test.js");
+  copyFileSync(join(import.meta.dir, "test-fixture-preload-global-lifecycle-hook-test.js"), path);
+  copyFileSync(join(import.meta.dir, "test-fixture-preload-global-lifecycle-hook-preloaded.js"), preloadedPath);
+  const { stdout } = spawnSync({
+    cmd: [bunExe(), "test", "--preload=" + preloadedPath, path],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: bunEnv,
+    cwd: realpathSync(dirname(path)),
+  });
+  expect(stdout.toString().trim()).toBe(
+    `
+beforeAll: #1
+beforeAll: #2
+beforeAll: TEST-FILE
+beforeAll: one describe scope
+beforeEach: #1
+beforeEach: #2
+beforeEach: TEST-FILE
+beforeEach: one describe scope
+-- inside one describe scope --
+afterEach: #1
+afterEach: #2
+afterEach: TEST-FILE
+afterEach: one describe scope
+afterAll: one describe scope
+beforeEach: #1
+beforeEach: #2
+beforeEach: TEST-FILE
+-- the top-level test --
+afterEach: #1
+afterEach: #2
+afterEach: TEST-FILE
+afterAll: TEST-FILE
+afterAll: #1
+afterAll: #2
+`.trim(),
+  );
 });

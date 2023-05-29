@@ -196,8 +196,7 @@ The following Web APIs are partially or completely supported.
 ---
 
 - Errors
-- [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/reportError) [`ResolveError`](https://developer.mozilla.org/en-US/docs/Web/API/ResolveError)
-  [`BuildError`](https://developer.mozilla.org/en-US/docs/Web/API/BuildError)
+- [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/reportError)
 
 ---
 
@@ -303,4 +302,4 @@ Bun exposes a set of Bun-specific APIs on the `Bun` global object and through a 
 
 ## Plugins
 
-Support for additional file types can be implemented with plugins. Refer to [Runtime > Plugins](/docs/runtime/plugins) for full documentation.
+Support for additional file types can be implemented with plugins. Refer to [Runtime > Plugins](/docs/bundler/plugins) for full documentation.

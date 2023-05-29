@@ -214,6 +214,17 @@ pub const ZigString = extern struct {
         return ZigString__toJSONObject(&this, globalThis);
     }
 
+    pub fn hasPrefixChar(this: ZigString, char: u8) bool {
+        if (this.len == 0)
+            return false;
+
+        if (this.is16Bit()) {
+            return this.utf16SliceAligned()[0] == char;
+        }
+
+        return this.slice()[0] == char;
+    }
+
     pub fn substring(this: ZigString, offset: usize, maxlen: usize) ZigString {
         var len: usize = undefined;
         if (maxlen == 0) {
@@ -421,10 +432,22 @@ pub const ZigString = extern struct {
     }
 
     pub inline fn utf16Slice(this: *const ZigString) []align(1) const u16 {
+        if (comptime bun.Environment.allow_assert) {
+            if (this.len > 0 and !this.is16Bit()) {
+                @panic("ZigString.utf16Slice() called on a latin1 string.\nPlease use .toSlice() instead or carefully check that .is16Bit() is false first.");
+            }
+        }
+
         return @ptrCast([*]align(1) const u16, untagged(this.ptr))[0..this.len];
     }
 
     pub inline fn utf16SliceAligned(this: *const ZigString) []const u16 {
+        if (comptime bun.Environment.allow_assert) {
+            if (this.len > 0 and !this.is16Bit()) {
+                @panic("ZigString.utf16SliceAligned() called on a latin1 string.\nPlease use .toSlice() instead or carefully check that .is16Bit() is false first.");
+            }
+        }
+
         return @ptrCast([*]const u16, @alignCast(@alignOf(u16), untagged(this.ptr)))[0..this.len];
     }
 
@@ -585,6 +608,12 @@ pub const ZigString = extern struct {
     }
 
     pub fn slice(this: *const ZigString) []const u8 {
+        if (comptime bun.Environment.allow_assert) {
+            if (this.len > 0 and this.is16Bit()) {
+                @panic("ZigString.slice() called on a UTF-16 string.\nPlease use .toSlice() instead or carefully check that .is16Bit() is false first.");
+            }
+        }
+
         return untagged(this.ptr)[0..@min(this.len, std.math.maxInt(u32))];
     }
 
@@ -1457,6 +1486,23 @@ pub const SystemError = extern struct {
         return shim.cppFn("toErrorInstance", .{ this, global });
     }
 
+    pub fn format(self: SystemError, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        // TODO: remove this hardcoding
+        switch (bun.Output.enable_ansi_colors_stderr) {
+            inline else => |enable_colors| try writer.print(
+                comptime bun.Output.prettyFmt(
+                    "<r><red>{}<r><d>:<r> {} <d>({}())<r>",
+                    enable_colors,
+                ),
+                .{
+                    self.code,
+                    self.message,
+                    self.syscall,
+                },
+            ),
+        }
+    }
+
     pub const Extern = [_][]const u8{
         "toErrorInstance",
     };
@@ -1786,6 +1832,11 @@ pub const AbortSignal = extern opaque {
         this: *AbortSignal,
     ) *AbortSignal {
         return cppFn("unref", .{this});
+    }
+
+    pub fn detach(this: *AbortSignal, ctx: ?*anyopaque) void {
+        this.cleanNativeBindings(ctx);
+        _ = this.unref();
     }
 
     pub fn fromJS(value: JSValue) ?*AbortSignal {
@@ -2317,6 +2368,16 @@ pub const JSGlobalObject = extern struct {
         this.throwValue(this.createErrorInstance("Out of memory", .{}));
     }
 
+    extern fn JSGlobalObject__clearTerminationException(this: *JSGlobalObject) void;
+    extern fn JSGlobalObject__throwTerminationException(this: *JSGlobalObject) void;
+    pub const throwTerminationException = JSGlobalObject__throwTerminationException;
+    pub const clearTerminationException = JSGlobalObject__clearTerminationException;
+    extern fn JSGlobalObject__setTimeZone(this: *JSGlobalObject, timeZone: *const ZigString) bool;
+
+    pub fn setTimeZone(this: *JSGlobalObject, timeZone: *const ZigString) bool {
+        return JSGlobalObject__setTimeZone(this, timeZone);
+    }
+
     pub fn throwInvalidArguments(
         this: *JSGlobalObject,
         comptime fmt: string,
@@ -2358,7 +2419,7 @@ pub const JSGlobalObject = extern struct {
     ) JSC.JSValue {
         return JSC.toTypeErrorWithCode(
             "NOT_ENOUGH_ARGUMENTS",
-            "Not enough arguments to '" ++ name_ ++ "''. Expected {d}, got {d}.",
+            "Not enough arguments to '" ++ name_ ++ "'. Expected {d}, got {d}.",
             .{ expected, got },
             this,
         );
@@ -2735,7 +2796,7 @@ pub const JSArrayIterator = struct {
         return .{
             .array = value,
             .global = global,
-            .len = @truncate(u32, value.getLengthOfArray(global)),
+            .len = @truncate(u32, value.getLength(global)),
         };
     }
 
@@ -2747,6 +2808,60 @@ pub const JSArrayIterator = struct {
         this.i += 1;
         return JSObject.getIndex(this.array, this.global, i);
     }
+};
+
+pub const JSMap = opaque {
+    pub const shim = Shimmer("JSC", "JSMap", @This());
+    pub const Type = JSMap;
+    const cppFn = shim.cppFn;
+
+    pub const include = "JavaScriptCore/JSMap.h";
+    pub const name = "JSC::JSMap";
+    pub const namespace = "JSC";
+
+    pub fn create(globalObject: *JSGlobalObject) JSValue {
+        return cppFn("create", .{globalObject});
+    }
+
+    pub fn set(this: *JSMap, globalObject: *JSGlobalObject, key: JSValue, value: JSValue) void {
+        return cppFn("set", .{ this, globalObject, key, value });
+    }
+
+    pub fn get_(this: *JSMap, globalObject: *JSGlobalObject, key: JSValue) JSValue {
+        return cppFn("get", .{ this, globalObject, key });
+    }
+
+    pub fn get(this: *JSMap, globalObject: *JSGlobalObject, key: JSValue) ?JSValue {
+        const value = get_(this, globalObject, key);
+        if (value.isEmpty()) {
+            return null;
+        }
+        return value;
+    }
+
+    pub fn has(this: *JSMap, globalObject: *JSGlobalObject, key: JSValue) bool {
+        return cppFn("has", .{ this, globalObject, key });
+    }
+
+    pub fn remove(this: *JSMap, globalObject: *JSGlobalObject, key: JSValue) bool {
+        return cppFn("remove", .{ this, globalObject, key });
+    }
+
+    pub fn fromJS(value: JSValue) ?*JSMap {
+        if (value.jsTypeLoose() == .JSMap) {
+            return bun.cast(*JSMap, value.asEncoded().asPtr.?);
+        }
+
+        return null;
+    }
+
+    pub const Extern = [_][]const u8{
+        "create",
+        "set",
+        "get_",
+        "has",
+        "remove",
+    };
 };
 
 pub const JSValueReprInt = i64;
@@ -2812,7 +2927,7 @@ pub const JSValue = enum(JSValueReprInt) {
         BooleanObject,
         NumberObject,
         ErrorInstance,
-        PureForwardingProxy,
+        GlobalProxy,
         DirectArguments,
         ScopedArguments,
         ClonedArguments,
@@ -2872,6 +2987,8 @@ pub const JSValue = enum(JSValueReprInt) {
         JSWeakMap,
         JSWeakSet,
         WebAssemblyModule,
+        WebAssemblyInstance,
+        WebAssemblyGCObject,
         // Start StringObject s.
         StringObject,
         DerivedStringObject,
@@ -2881,6 +2998,10 @@ pub const JSValue = enum(JSValueReprInt) {
         Event = 0b11101111,
         DOMWrapper = 0b11101110,
         Blob = 0b11111100,
+
+        /// This means that we don't have Zig bindings for the type yet, but it
+        /// implements .toJSON()
+        JSAsJSONType = 0b11110000 | 1,
         _,
 
         pub fn canGet(this: JSType) bool {
@@ -2929,6 +3050,8 @@ pub const JSValue = enum(JSValueReprInt) {
                 .Uint8Array,
                 .Uint8ClampedArray,
                 .WebAssemblyModule,
+                .WebAssemblyInstance,
+                .WebAssemblyGCObject,
                 => true,
                 else => false,
             };
@@ -3008,6 +3131,10 @@ pub const JSValue = enum(JSValueReprInt) {
         pub const LastMaybeFalsyCellPrimitive = JSType.HeapBigInt;
         pub const LastJSCObject = JSType.DerivedStringObject; // This is the last "JSC" Object type. After this, we have embedder's (e.g., WebCore) extended object types.
 
+        pub inline fn isString(this: JSType) bool {
+            return this == .String;
+        }
+
         pub inline fn isStringLike(this: JSType) bool {
             return switch (this) {
                 .String, .StringObject, .DerivedStringObject => true,
@@ -3018,6 +3145,42 @@ pub const JSValue = enum(JSValueReprInt) {
         pub inline fn isArray(this: JSType) bool {
             return switch (this) {
                 .Array, .DerivedArray => true,
+                else => false,
+            };
+        }
+
+        pub inline fn isArrayLike(this: JSType) bool {
+            return switch (this) {
+                .Array,
+                .DerivedArray,
+
+                .ArrayBuffer,
+                .BigInt64Array,
+                .BigUint64Array,
+                .Float32Array,
+                .Float64Array,
+                .Int16Array,
+                .Int32Array,
+                .Int8Array,
+                .Uint16Array,
+                .Uint32Array,
+                .Uint8Array,
+                .Uint8ClampedArray,
+                => true,
+                else => false,
+            };
+        }
+
+        pub inline fn isSet(this: JSType) bool {
+            return switch (this) {
+                .JSSet, .JSWeakSet => true,
+                else => false,
+            };
+        }
+
+        pub inline fn isMap(this: JSType) bool {
+            return switch (this) {
+                .JSMap, .JSWeakMap => true,
                 else => false,
             };
         }
@@ -3215,6 +3378,18 @@ pub const JSValue = enum(JSValueReprInt) {
         }
 
         if (comptime @hasDecl(ZigType, "fromJS") and @TypeOf(ZigType.fromJS) == fn (JSC.JSValue) ?*ZigType) {
+            if (comptime ZigType == JSC.WebCore.Blob) {
+                if (ZigType.fromJS(value)) |blob| {
+                    return blob;
+                }
+
+                if (JSC.API.BuildArtifact.fromJS(value)) |build| {
+                    return &build.blob;
+                }
+
+                return null;
+            }
+
             return ZigType.fromJS(value);
         }
 
@@ -3660,12 +3835,17 @@ pub const JSValue = enum(JSValueReprInt) {
         return res;
     }
 
+    /// Returns true if
+    /// - `" string literal"`
+    /// - `new String("123")`
+    /// - `class DerivedString extends String; new DerivedString("123")`
     pub inline fn isString(this: JSValue) bool {
         if (!this.isCell())
             return false;
 
         return jsType(this).isStringLike();
     }
+
     pub fn isBigInt(this: JSValue) bool {
         return cppFn("isBigInt", .{this});
     }
@@ -3960,12 +4140,12 @@ pub const JSValue = enum(JSValueReprInt) {
         return null;
     }
 
-    pub fn toEnumWithMapField(
+    pub fn toEnumFromMap(
         this: JSValue,
         globalThis: *JSGlobalObject,
         comptime property_name: []const u8,
         comptime Enum: type,
-        comptime map_name: []const u8,
+        comptime StringMap: anytype,
     ) !Enum {
         if (!this.isString()) {
             globalThis.throwInvalidArguments(property_name ++ " must be a string", .{});
@@ -3973,11 +4153,11 @@ pub const JSValue = enum(JSValueReprInt) {
         }
 
         const target_str = this.getZigString(globalThis);
-        return @field(Enum, map_name).getWithEql(target_str, ZigString.eqlComptime) orelse {
+        return StringMap.getWithEql(target_str, ZigString.eqlComptime) orelse {
             const one_of = struct {
                 pub const list = brk: {
                     var str: []const u8 = "'";
-                    const field_names = std.meta.fieldNames(Enum);
+                    const field_names = bun.meta.enumFieldNames(Enum);
                     for (field_names, 0..) |entry, i| {
                         str = str ++ entry ++ "'";
                         if (i < field_names.len - 2) {
@@ -3997,7 +4177,7 @@ pub const JSValue = enum(JSValueReprInt) {
     }
 
     pub fn toEnum(this: JSValue, globalThis: *JSGlobalObject, comptime property_name: []const u8, comptime Enum: type) !Enum {
-        return toEnumWithMapField(this, globalThis, property_name, Enum, "Map");
+        return toEnumFromMap(this, globalThis, property_name, Enum, Enum.Map);
     }
 
     pub fn toOptionalEnum(this: JSValue, globalThis: *JSGlobalObject, comptime property_name: []const u8, comptime Enum: type) !?Enum {
@@ -4009,9 +4189,10 @@ pub const JSValue = enum(JSValueReprInt) {
 
     pub fn getOptionalEnum(this: JSValue, globalThis: *JSGlobalObject, comptime property_name: []const u8, comptime Enum: type) !?Enum {
         if (get(this, globalThis, property_name)) |prop| {
+            if (prop.isEmptyOrUndefinedOrNull())
+                return null;
             return try toEnum(prop, globalThis, property_name, Enum);
         }
-
         return null;
     }
 
@@ -4022,7 +4203,7 @@ pub const JSValue = enum(JSValueReprInt) {
                 return error.JSError;
             }
 
-            if (prop.getLengthOfArray(globalThis) == 0) {
+            if (prop.getLength(globalThis) == 0) {
                 return null;
             }
 
@@ -4248,8 +4429,53 @@ pub const JSValue = enum(JSValueReprInt) {
         return @intCast(u32, @max(this.toInt32(), 0));
     }
 
-    pub fn getLengthOfArray(this: JSValue, globalThis: *JSGlobalObject) u64 {
-        return cppFn("getLengthOfArray", .{
+    /// This function supports:
+    /// - Array, DerivedArray & friends
+    /// - String, DerivedString & friends
+    /// - TypedArray
+    /// - Map (size)
+    /// - WeakMap (size)
+    /// - Set (size)
+    /// - WeakSet (size)
+    /// - ArrayBuffer (byteLength)
+    /// - anything with a .length property returning a number
+    ///
+    /// If the "length" property does not exist, this function will return 0.
+    pub fn getLength(this: JSValue, globalThis: *JSGlobalObject) u64 {
+        const len = this.getLengthIfPropertyExistsInternal(globalThis);
+        if (len == std.math.f64_max) {
+            return 0;
+        }
+
+        return @floatToInt(u64, @max(len, 0));
+    }
+
+    /// This function supports:
+    /// - Array, DerivedArray & friends
+    /// - String, DerivedString & friends
+    /// - TypedArray
+    /// - Map (size)
+    /// - WeakMap (size)
+    /// - Set (size)
+    /// - WeakSet (size)
+    /// - ArrayBuffer (byteLength)
+    /// - anything with a .length property returning a number
+    ///
+    /// If the "length" property does not exist, this function will return null.
+    pub fn tryGetLength(this: JSValue, globalThis: *JSGlobalObject) ?f64 {
+        const len = this.getLengthIfPropertyExistsInternal(globalThis);
+        if (len == std.math.f64_max) {
+            return null;
+        }
+
+        return @floatToInt(u64, @max(len, 0));
+    }
+
+    /// Do not use this directly!
+    ///
+    /// If the property does not exist, this function will return max(f64) instead of 0.
+    pub fn getLengthIfPropertyExistsInternal(this: JSValue, globalThis: *JSGlobalObject) f64 {
+        return cppFn("getLengthIfPropertyExistsInternal", .{
             this,
             globalThis,
         });
@@ -4361,7 +4587,7 @@ pub const JSValue = enum(JSValueReprInt) {
         "getIfExists",
         "getIfPropertyExistsFromPath",
         "getIfPropertyExistsImpl",
-        "getLengthOfArray",
+        "getLengthIfPropertyExistsInternal",
         "getNameProperty",
         "getPropertyByPropertyName",
         "getPropertyNames",
@@ -4833,7 +5059,8 @@ pub const EncodedJSValue = extern union {
     asPtr: ?*anyopaque,
     asDouble: f64,
 };
-
+pub const JSHostFunctionType = fn (*JSGlobalObject, *CallFrame) callconv(.C) JSValue;
+pub const JSHostFunctionPtr = *const JSHostFunctionType;
 const DeinitFunction = *const fn (ctx: *anyopaque, buffer: [*]u8, len: usize) callconv(.C) void;
 
 pub const JSArray = struct {
@@ -4863,7 +5090,7 @@ const private = struct {
         globalObject: *JSGlobalObject,
         symbolName: ?*const ZigString,
         argCount: u32,
-        functionPointer: *const anyopaque,
+        functionPointer: JSHostFunctionPtr,
         strong: bool,
     ) JSValue;
 
@@ -4885,7 +5112,7 @@ pub fn NewFunction(
     globalObject: *JSGlobalObject,
     symbolName: ?*const ZigString,
     argCount: u32,
-    comptime functionPointer: anytype,
+    comptime functionPointer: JSHostFunctionType,
     strong: bool,
 ) JSValue {
     return NewRuntimeFunction(globalObject, symbolName, argCount, &functionPointer, strong);
@@ -4895,11 +5122,11 @@ pub fn NewRuntimeFunction(
     globalObject: *JSGlobalObject,
     symbolName: ?*const ZigString,
     argCount: u32,
-    functionPointer: anytype,
+    functionPointer: JSHostFunctionPtr,
     strong: bool,
 ) JSValue {
     JSC.markBinding(@src());
-    return private.Bun__CreateFFIFunctionValue(globalObject, symbolName, argCount, @ptrCast(*const anyopaque, functionPointer), strong);
+    return private.Bun__CreateFFIFunctionValue(globalObject, symbolName, argCount, functionPointer, strong);
 }
 
 pub fn getFunctionData(function: JSValue) ?*anyopaque {

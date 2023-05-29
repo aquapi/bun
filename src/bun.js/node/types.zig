@@ -10,7 +10,7 @@ const Environment = bun.Environment;
 const C = bun.C;
 const Syscall = @import("./syscall.zig");
 const os = std.os;
-const Buffer = JSC.MarkedArrayBuffer;
+pub const Buffer = JSC.MarkedArrayBuffer;
 const IdentityContext = @import("../../identity_context.zig").IdentityContext;
 const logger = @import("root").bun.logger;
 const Fs = @import("../../fs.zig");
@@ -1988,13 +1988,19 @@ pub const Process = struct {
         var args_list = std.ArrayListUnmanaged(JSC.ZigString){ .items = args, .capacity = args.len };
         args_list.items.len = 0;
 
-        // get the bun executable
-        // without paying the cost of a syscall to resolve the full path
-        args_list.appendAssumeCapacity(
-            JSC.ZigString.init(
-                std.fs.selfExePathAlloc(allocator) catch "bun",
-            ).withEncoding(),
-        );
+        if (vm.standalone_module_graph != null) {
+            // Don't break user's code because they did process.argv.slice(2)
+            // Even if they didn't type "bun", we still want to add it
+            args_list.appendAssumeCapacity(
+                JSC.ZigString.init("bun"),
+            );
+        } else {
+            args_list.appendAssumeCapacity(
+                JSC.ZigString.init(
+                    std.fs.selfExePathAlloc(allocator) catch "bun",
+                ).withEncoding(),
+            );
+        }
 
         if (vm.main.len > 0)
             args_list.appendAssumeCapacity(JSC.ZigString.init(vm.main).withEncoding());

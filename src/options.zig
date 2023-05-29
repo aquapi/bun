@@ -636,6 +636,52 @@ pub const Target = enum {
     };
 };
 
+pub const Format = enum {
+    esm,
+    cjs,
+    iife,
+
+    pub const Map = ComptimeStringMap(
+        Format,
+        .{
+            .{
+                "esm",
+                Format.esm,
+            },
+            .{
+                "cjs",
+                Format.cjs,
+            },
+            .{
+                "iife",
+                Format.iife,
+            },
+        },
+    );
+
+    pub fn fromJS(global: *JSC.JSGlobalObject, format: JSC.JSValue, exception: JSC.C.ExceptionRef) ?Format {
+        if (format.isUndefinedOrNull()) return null;
+
+        if (!format.jsType().isStringLike()) {
+            JSC.throwInvalidArguments("Format must be a string", .{}, global, exception);
+            return null;
+        }
+
+        var zig_str = JSC.ZigString.init("");
+        format.toZigString(&zig_str, global);
+        if (zig_str.len == 0) return null;
+
+        return fromString(zig_str.slice()) orelse {
+            JSC.throwInvalidArguments("Invalid format - must be esm, cjs, or iife", .{}, global, exception);
+            return null;
+        };
+    }
+
+    pub fn fromString(slice: string) ?Format {
+        return Map.getWithEql(slice, strings.eqlComptime);
+    }
+};
+
 pub const Loader = enum(u8) {
     jsx,
     js,
@@ -745,6 +791,27 @@ pub const Loader = enum(u8) {
         .{ "base64", Loader.base64 },
         .{ "txt", Loader.text },
         .{ "text", Loader.text },
+    });
+
+    pub const api_names = bun.ComptimeStringMap(Api.Loader, .{
+        .{ "js", Api.Loader.js },
+        .{ "mjs", Api.Loader.js },
+        .{ "cjs", Api.Loader.js },
+        .{ "cts", Api.Loader.ts },
+        .{ "mts", Api.Loader.ts },
+        .{ "jsx", Api.Loader.jsx },
+        .{ "ts", Api.Loader.ts },
+        .{ "tsx", Api.Loader.tsx },
+        .{ "css", Api.Loader.css },
+        .{ "file", Api.Loader.file },
+        .{ "json", Api.Loader.json },
+        .{ "toml", Api.Loader.toml },
+        .{ "wasm", Api.Loader.wasm },
+        .{ "node", Api.Loader.napi },
+        .{ "dataurl", Api.Loader.dataurl },
+        .{ "base64", Api.Loader.base64 },
+        .{ "txt", Api.Loader.text },
+        .{ "text", Api.Loader.text },
     });
 
     pub fn fromString(slice_: string) ?Loader {
@@ -867,9 +934,9 @@ pub const ESMConditions = struct {
         var import_condition_map = ConditionsMap.init(allocator);
         var require_condition_map = ConditionsMap.init(allocator);
 
-        try default_condition_amp.ensureTotalCapacity(defaults.len + 1);
-        try import_condition_map.ensureTotalCapacity(defaults.len + 1);
-        try require_condition_map.ensureTotalCapacity(defaults.len + 1);
+        try default_condition_amp.ensureTotalCapacity(defaults.len + 2);
+        try import_condition_map.ensureTotalCapacity(defaults.len + 2);
+        try require_condition_map.ensureTotalCapacity(defaults.len + 2);
 
         import_condition_map.putAssumeCapacity("import", {});
         require_condition_map.putAssumeCapacity("require", {});
@@ -881,6 +948,8 @@ pub const ESMConditions = struct {
         }
 
         default_condition_amp.putAssumeCapacity("default", {});
+        import_condition_map.putAssumeCapacity("default", {});
+        require_condition_map.putAssumeCapacity("default", {});
 
         return ESMConditions{
             .default = default_condition_amp,
@@ -896,7 +965,7 @@ pub const JSX = struct {
         .{ "automatic", JSX.Runtime.automatic },
         .{ "react", JSX.Runtime.classic },
         .{ "react-jsx", JSX.Runtime.automatic },
-        .{ "react-jsxDEV", JSX.Runtime.automatic },
+        .{ "react-jsxdev", JSX.Runtime.automatic },
         .{ "solid", JSX.Runtime.solid },
     });
 
@@ -985,8 +1054,8 @@ pub const JSX = struct {
         }
 
         pub const Defaults = struct {
-            pub const Factory = &[_]string{"createElement"};
-            pub const Fragment = &[_]string{"Fragment"};
+            pub const Factory = &[_]string{"React.createElement"};
+            pub const Fragment = &[_]string{"React.Fragment"};
             pub const ImportSourceDev = "react/jsx-dev-runtime";
             pub const ImportSource = "react/jsx-runtime";
             pub const JSXFunction = "jsx";
@@ -1047,7 +1116,7 @@ pub const JSX = struct {
             pragma.runtime = jsx.runtime;
 
             if (jsx.import_source.len > 0) {
-                pragma.package_name = parsePackageName(pragma.importSource());
+                pragma.package_name = jsx.import_source;
                 pragma.setImportSource(allocator);
                 pragma.classic_import_source = pragma.package_name;
             }
@@ -1269,7 +1338,7 @@ pub const SourceMapOption = enum {
         };
     }
 
-    pub const map = ComptimeStringMap(SourceMapOption, .{
+    pub const Map = ComptimeStringMap(SourceMapOption, .{
         .{ "none", .none },
         .{ "inline", .@"inline" },
         .{ "external", .external },
@@ -1321,6 +1390,7 @@ pub const BundleOptions = struct {
     output_dir_handle: ?Dir = null,
 
     output_dir: string = "out",
+    root_dir: string = "",
     node_modules_bundle_url: string = "",
     node_modules_bundle_pretty_path: string = "",
 
@@ -1370,7 +1440,7 @@ pub const BundleOptions = struct {
     conditions: ESMConditions = undefined,
     tree_shaking: bool = false,
     code_splitting: bool = false,
-    sourcemap: SourceMapOption = SourceMapOption.none,
+    source_map: SourceMapOption = SourceMapOption.none,
 
     disable_transpilation: bool = false,
 
@@ -1384,6 +1454,8 @@ pub const BundleOptions = struct {
     minify_syntax: bool = false,
     minify_identifiers: bool = false,
 
+    compile: bool = false,
+
     /// This is a list of packages which even when require() is used, we will
     /// instead convert to ESM import statements.
     ///
@@ -1392,20 +1464,24 @@ pub const BundleOptions = struct {
     /// So we have a list of packages which we know are safe to do this with.
     unwrap_commonjs_packages: []const string = &default_unwrap_commonjs_packages,
 
+    pub fn isTest(this: *const BundleOptions) bool {
+        return this.rewrite_jest_for_tests;
+    }
+
     pub fn setProduction(this: *BundleOptions, value: bool) void {
         this.production = value;
         this.jsx.development = !value;
     }
 
     pub const default_unwrap_commonjs_packages = [_]string{
-        "__bun-test-unwrap-commonjs__",
         "react",
-        "react-client",
-        "react-dom",
         "react-is",
-        "react-refresh",
-        "react-server",
+        "react-dom",
         "scheduler",
+        "react-client",
+        "react-server",
+        "react-refresh",
+        "__bun-test-unwrap-commonjs__",
     };
 
     pub inline fn cssImportBehavior(this: *const BundleOptions) Api.CssInJsBehavior {
@@ -1437,10 +1513,20 @@ pub const BundleOptions = struct {
             this.target,
             loader_,
             env,
-            if (loader_) |e|
-                e.map.get("BUN_ENV") orelse e.map.get("NODE_ENV")
-            else
-                null,
+            node_env: {
+                if (loader_) |e|
+                    if (e.map.get("BUN_ENV") orelse e.map.get("NODE_ENV")) |env_| break :node_env env_;
+
+                if (this.isTest()) {
+                    break :node_env "\"test\"";
+                }
+
+                if (this.production) {
+                    break :node_env "\"production\"";
+                }
+
+                break :node_env "\"development\"";
+            },
         );
         this.defines_loaded = true;
     }
@@ -1667,7 +1753,7 @@ pub const BundleOptions = struct {
             if (opts.framework == null)
                 opts.env.behavior = .load_all;
 
-            opts.sourcemap = SourceMapOption.fromApi(transform.source_map orelse Api.SourceMapMode.external);
+            opts.source_map = SourceMapOption.fromApi(transform.source_map orelse Api.SourceMapMode.external);
 
             opts.resolve_mode = .lazy;
 
@@ -1679,18 +1765,18 @@ pub const BundleOptions = struct {
 
             if (!static_dir_set) {
                 chosen_dir = choice: {
-                    if (fs.fs.readDirectory(fs.top_level_dir, null)) |dir_| {
+                    if (fs.fs.readDirectory(fs.top_level_dir, null, 0, false)) |dir_| {
                         const dir: *const Fs.FileSystem.RealFS.EntriesOption = dir_;
                         switch (dir.*) {
                             .entries => {
                                 if (dir.entries.getComptimeQuery("public")) |q| {
-                                    if (q.entry.kind(&fs.fs) == .dir) {
+                                    if (q.entry.kind(&fs.fs, true) == .dir) {
                                         break :choice "public";
                                     }
                                 }
 
                                 if (dir.entries.getComptimeQuery("static")) |q| {
-                                    if (q.entry.kind(&fs.fs) == .dir) {
+                                    if (q.entry.kind(&fs.fs, true) == .dir) {
                                         break :choice "static";
                                     }
                                 }
@@ -1809,7 +1895,7 @@ pub const BundleOptions = struct {
 
             opts.serve = true;
         } else {
-            opts.sourcemap = SourceMapOption.fromApi(transform.source_map orelse Api.SourceMapMode._none);
+            opts.source_map = SourceMapOption.fromApi(transform.source_map orelse Api.SourceMapMode._none);
         }
 
         opts.tree_shaking = opts.serve or opts.target.isBun() or opts.production or is_generating_bundle;
@@ -1915,10 +2001,17 @@ pub const TransformOptions = struct {
 // This saves us from allocating a buffer
 pub const OutputFile = struct {
     loader: Loader,
-    input: Fs.Path,
+    input_loader: Loader = .js,
+    src_path: Fs.Path,
     value: Value,
     size: usize = 0,
+    size_without_sourcemap: usize = 0,
     mtime: ?i128 = null,
+    hash: u64 = 0,
+    is_executable: bool = false,
+    source_map_index: u32 = std.math.maxInt(u32),
+    output_kind: JSC.API.BuildArtifact.OutputKind = .chunk,
+    dest_path: []const u8 = "",
 
     // Depending on:
     // - The target
@@ -1933,28 +2026,6 @@ pub const OutputFile = struct {
         is_outdir: bool = false,
         close_handle_on_complete: bool = false,
         autowatch: bool = true,
-
-        pub fn toJS(this: FileOperation, globalObject: *JSC.JSGlobalObject, loader: Loader) JSC.JSValue {
-            var file_blob = JSC.WebCore.Blob.Store.initFile(
-                if (this.fd != 0) JSC.Node.PathOrFileDescriptor{
-                    .fd = this.fd,
-                } else JSC.Node.PathOrFileDescriptor{
-                    .path = JSC.Node.PathLike{ .string = bun.PathString.init(globalObject.allocator().dupe(u8, this.pathname) catch unreachable) },
-                },
-                loader.toMimeType(),
-                globalObject.allocator(),
-            ) catch |err| {
-                Output.panic("error: Unable to create file blob: \"{s}\"", .{@errorName(err)});
-            };
-
-            var blob = globalObject.allocator().create(JSC.WebCore.Blob) catch unreachable;
-            blob.* = JSC.WebCore.Blob.initWithStore(file_blob, globalObject);
-            blob.allocator = globalObject.allocator();
-            blob.globalThis = globalObject;
-            blob.content_type = loader.toMimeType().value;
-
-            return blob.toJS(globalObject);
-        }
 
         pub fn fromFile(fd: FileDescriptorType, pathname: string) FileOperation {
             return .{
@@ -2017,7 +2088,7 @@ pub const OutputFile = struct {
     pub fn initPending(loader: Loader, pending: resolver.Result) OutputFile {
         return .{
             .loader = loader,
-            .input = pending.pathConst().?.*,
+            .src_path = pending.pathConst().?.*,
             .size = 0,
             .value = .{ .pending = pending },
         };
@@ -2026,7 +2097,7 @@ pub const OutputFile = struct {
     pub fn initFile(file: std.fs.File, pathname: string, size: usize) OutputFile {
         return .{
             .loader = .file,
-            .input = Fs.Path.init(pathname),
+            .src_path = Fs.Path.init(pathname),
             .size = size,
             .value = .{ .copy = FileOperation.fromFile(file.handle, pathname) },
         };
@@ -2038,11 +2109,68 @@ pub const OutputFile = struct {
         return res;
     }
 
-    pub fn initBuf(buf: []const u8, allocator: std.mem.Allocator, pathname: string, loader: Loader) OutputFile {
+    pub const Options = struct {
+        loader: Loader,
+        input_loader: Loader,
+        hash: ?u64 = null,
+        source_map_index: ?u32 = null,
+        output_path: string,
+        size: ?usize = null,
+        input_path: []const u8 = "",
+        display_size: u32 = 0,
+        output_kind: JSC.API.BuildArtifact.OutputKind = .chunk,
+        is_executable: bool = false,
+        data: union(enum) {
+            buffer: struct {
+                allocator: std.mem.Allocator,
+                data: []const u8,
+            },
+            file: struct {
+                file: std.fs.File,
+                size: usize,
+                dir: std.fs.Dir,
+            },
+            saved: usize,
+        },
+    };
+
+    pub fn init(options: Options) OutputFile {
+        return OutputFile{
+            .loader = options.loader,
+            .input_loader = options.input_loader,
+            .src_path = Fs.Path.init(options.input_path),
+            .dest_path = options.output_path,
+            .size = options.size orelse switch (options.data) {
+                .buffer => |buf| buf.data.len,
+                .file => |file| file.size,
+                .saved => 0,
+            },
+            .size_without_sourcemap = options.display_size,
+            .hash = options.hash orelse 0,
+            .output_kind = options.output_kind,
+            .source_map_index = options.source_map_index orelse std.math.maxInt(u32),
+            .is_executable = options.is_executable,
+            .value = switch (options.data) {
+                .buffer => |buffer| Value{ .buffer = .{ .allocator = buffer.allocator, .bytes = buffer.data } },
+                .file => |file| Value{
+                    .copy = brk: {
+                        var op = FileOperation.fromFile(file.file.handle, options.output_path);
+                        op.dir = file.dir.fd;
+                        break :brk op;
+                    },
+                },
+                .saved => Value{ .saved = .{} },
+            },
+        };
+    }
+
+    pub fn initBuf(buf: []const u8, allocator: std.mem.Allocator, pathname: string, loader: Loader, hash: ?u64, source_map_index: ?u32) OutputFile {
         return .{
             .loader = loader,
-            .input = Fs.Path.init(pathname),
+            .src_path = Fs.Path.init(pathname),
             .size = buf.len,
+            .hash = hash orelse 0,
+            .source_map_index = source_map_index orelse std.math.maxInt(u32),
             .value = .{
                 .buffer = .{
                     .bytes = buf,
@@ -2063,7 +2191,7 @@ pub const OutputFile = struct {
         const fd_out = file_out.handle;
         var do_close = false;
         // TODO: close file_out on error
-        const fd_in = (try std.fs.openFileAbsolute(file.input.text, .{ .mode = .read_only })).handle;
+        const fd_in = (try std.fs.openFileAbsolute(file.src_path.text, .{ .mode = .read_only })).handle;
 
         if (Environment.isWindows) {
             Fs.FileSystem.setMaxFd(fd_out);
@@ -2083,18 +2211,65 @@ pub const OutputFile = struct {
 
     pub fn toJS(
         this: *OutputFile,
-        owned_pathname: []const u8,
+        owned_pathname: ?[]const u8,
         globalObject: *JSC.JSGlobalObject,
     ) bun.JSC.JSValue {
         return switch (this.value) {
-            .pending => @panic("Unexpected pending output file"),
+            .move, .pending => @panic("Unexpected pending output file"),
             .noop => JSC.JSValue.undefined,
-            .move => this.value.move.toJS(globalObject, this.loader),
-            .copy => this.value.copy.toJS(globalObject, this.loader),
-            .saved => SavedFile.toJS(globalObject, owned_pathname, this.size),
+            .copy => |copy| brk: {
+                var build_output = bun.default_allocator.create(JSC.API.BuildArtifact) catch @panic("Unable to allocate Artifact");
+                var file_blob = JSC.WebCore.Blob.Store.initFile(
+                    if (copy.fd != 0)
+                        JSC.Node.PathOrFileDescriptor{
+                            .fd = copy.fd,
+                        }
+                    else
+                        JSC.Node.PathOrFileDescriptor{
+                            .path = JSC.Node.PathLike{ .string = bun.PathString.init(globalObject.allocator().dupe(u8, copy.pathname) catch unreachable) },
+                        },
+                    this.loader.toMimeType(),
+                    globalObject.allocator(),
+                ) catch |err| {
+                    Output.panic("error: Unable to create file blob: \"{s}\"", .{@errorName(err)});
+                };
+
+                build_output.* = JSC.API.BuildArtifact{
+                    .blob = JSC.WebCore.Blob.initWithStore(file_blob, globalObject),
+                    .hash = this.hash,
+                    .loader = this.input_loader,
+                    .output_kind = this.output_kind,
+                    .path = bun.default_allocator.dupe(u8, copy.pathname) catch @panic("Failed to allocate path"),
+                };
+
+                break :brk build_output.toJS(globalObject);
+            },
+            .saved => brk: {
+                var build_output = bun.default_allocator.create(JSC.API.BuildArtifact) catch @panic("Unable to allocate Artifact");
+                const path_to_use = owned_pathname orelse this.src_path.text;
+
+                var file_blob = JSC.WebCore.Blob.Store.initFile(
+                    JSC.Node.PathOrFileDescriptor{
+                        .path = JSC.Node.PathLike{ .string = bun.PathString.init(owned_pathname orelse (bun.default_allocator.dupe(u8, this.src_path.text) catch unreachable)) },
+                    },
+                    this.loader.toMimeType(),
+                    globalObject.allocator(),
+                ) catch |err| {
+                    Output.panic("error: Unable to create file blob: \"{s}\"", .{@errorName(err)});
+                };
+
+                build_output.* = JSC.API.BuildArtifact{
+                    .blob = JSC.WebCore.Blob.initWithStore(file_blob, globalObject),
+                    .hash = this.hash,
+                    .loader = this.input_loader,
+                    .output_kind = this.output_kind,
+                    .path = bun.default_allocator.dupe(u8, path_to_use) catch @panic("Failed to allocate path"),
+                };
+
+                break :brk build_output.toJS(globalObject);
+            },
             .buffer => |buffer| brk: {
-                var blob = bun.default_allocator.create(JSC.WebCore.Blob) catch unreachable;
-                blob.* = JSC.WebCore.Blob.init(@constCast(buffer.bytes), buffer.allocator, globalObject);
+                var blob = JSC.WebCore.Blob.init(@constCast(buffer.bytes), buffer.allocator, globalObject);
                 if (blob.store) |store| {
                     store.mime_type = this.loader.toMimeType();
                     blob.content_type = store.mime_type.value;
@@ -2102,10 +2277,17 @@ pub const OutputFile = struct {
                     blob.content_type = this.loader.toMimeType().value;
                 }
 
-                blob.allocator = bun.default_allocator;
-                const blob_jsvalue = blob.toJS(globalObject);
-                blob_jsvalue.ensureStillAlive();
-                break :brk blob_jsvalue;
+                blob.size = @truncate(JSC.WebCore.Blob.SizeType, buffer.bytes.len);
+
+                var build_output = bun.default_allocator.create(JSC.API.BuildArtifact) catch @panic("Unable to allocate Artifact");
+                build_output.* = JSC.API.BuildArtifact{
+                    .blob = blob,
+                    .hash = this.hash,
+                    .loader = this.input_loader,
+                    .output_kind = this.output_kind,
+                    .path = owned_pathname orelse bun.default_allocator.dupe(u8, this.src_path.text) catch unreachable,
+                };
+                break :brk build_output.toJS(globalObject);
             },
         };
     }
@@ -2617,12 +2799,12 @@ pub const PathTemplate = struct {
             };
 
             switch (field) {
-                .dir => try writer.writeAll(self.placeholder.dir),
+                .dir => try writer.writeAll(if (self.placeholder.dir.len > 0) self.placeholder.dir else "."),
                 .name => try writer.writeAll(self.placeholder.name),
                 .ext => try writer.writeAll(self.placeholder.ext),
                 .hash => {
                     if (self.placeholder.hash) |hash| {
-                        try writer.print("{any}", .{bun.fmt.hexIntLower(hash)});
+                        try writer.print("{any}", .{(hashFormatter(hash))});
                     }
                 },
             }
@@ -2631,6 +2813,8 @@ pub const PathTemplate = struct {
 
         try writer.writeAll(remain);
     }
+
+    pub const hashFormatter = bun.fmt.hexIntLower;
 
     pub const Placeholder = struct {
         dir: []const u8 = "",

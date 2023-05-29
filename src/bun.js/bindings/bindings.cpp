@@ -90,6 +90,10 @@
 #include "DOMFormData.h"
 #include "JSDOMFormData.h"
 #include "ZigGeneratedClasses.h"
+#include "JavaScriptCore/JSMapInlines.h"
+
+#include <JavaScriptCore/JSWeakMap.h>
+#include "JSURLSearchParams.h"
 
 template<typename UWSResponse>
 static void copyToUWS(WebCore::FetchHeaders* headers, UWSResponse* res)
@@ -1117,11 +1121,78 @@ JSC__JSValue JSC__JSValue__createEmptyObject(JSC__JSGlobalObject* globalObject,
         JSC::constructEmptyObject(globalObject, globalObject->objectPrototype(), initialCapacity));
 }
 
-uint64_t JSC__JSValue__getLengthOfArray(JSC__JSValue value, JSC__JSGlobalObject* globalObject)
+extern "C" uint64_t Bun__Blob__getSizeForBindings(void* blob);
+
+double JSC__JSValue__getLengthIfPropertyExistsInternal(JSC__JSValue value, JSC__JSGlobalObject* globalObject)
 {
     JSC::JSValue jsValue = JSC::JSValue::decode(value);
-    JSC::JSObject* object = jsValue.toObject(globalObject);
-    return JSC::toLength(globalObject, object);
+    if (!jsValue || !jsValue.isCell())
+        return 0;
+    JSCell* cell = jsValue.asCell();
+    JSC::JSType type = cell->type();
+
+    switch (type) {
+    case JSC::JSType::StringType:
+        return static_cast<double>(jsValue.toString(globalObject)->length());
+    case JSC::JSType::ArrayType:
+        return static_cast<double>(jsCast<JSC::JSArray*>(cell)->length());
+
+    case JSC::JSType::Int8ArrayType:
+    case JSC::JSType::Uint8ArrayType:
+    case JSC::JSType::Uint8ClampedArrayType:
+    case JSC::JSType::Int16ArrayType:
+    case JSC::JSType::Uint16ArrayType:
+    case JSC::JSType::Int32ArrayType:
+    case JSC::JSType::Uint32ArrayType:
+    case JSC::JSType::Float32ArrayType:
+    case JSC::JSType::Float64ArrayType:
+    case JSC::JSType::BigInt64ArrayType:
+    case JSC::JSType::BigUint64ArrayType:
+        return static_cast<double>(jsCast<JSC::JSArrayBufferView*>(cell)->length());
+
+    case JSC::JSType::JSMapType:
+        return static_cast<double>(jsCast<JSC::JSMap*>(cell)->size());
+
+    case JSC::JSType::JSSetType:
+        return static_cast<double>(jsCast<JSC::JSSet*>(cell)->size());
+
+    case JSC::JSType::JSWeakMapType:
+        return static_cast<double>(jsCast<JSC::JSWeakMap*>(cell)->size());
+
+    case JSC::JSType::ArrayBufferType: {
+        auto* arrayBuffer = jsCast<JSC::JSArrayBuffer*>(cell);
+        if (auto* impl = arrayBuffer->impl()) {
+            return static_cast<double>(impl->byteLength());
+        }
+
+        return 0;
+    }
+
+    case JSC::JSType(JSDOMWrapperType): {
+        if (auto* headers = jsDynamicCast<WebCore::JSFetchHeaders*>(cell))
+            return static_cast<double>(jsCast<WebCore::JSFetchHeaders*>(cell)->wrapped().size());
+
+        if (auto* blob = jsDynamicCast<WebCore::JSBlob*>(cell)) {
+            uint64_t size = Bun__Blob__getSizeForBindings(blob->wrapped());
+            if (size == std::numeric_limits<uint64_t>::max())
+                return std::numeric_limits<double>::max();
+            return static_cast<double>(size);
+        }
+    }
+
+    default: {
+
+        if (auto* object = jsDynamicCast<JSObject*>(cell)) {
+            auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+            if (JSValue lengthValue = object->getIfPropertyExists(globalObject, globalObject->vm().propertyNames->length)) {
+                RETURN_IF_EXCEPTION(scope, 0);
+                RELEASE_AND_RETURN(scope, lengthValue.toNumber(globalObject));
+            }
+        }
+    }
+    }
+
+    return std::numeric_limits<double>::infinity();
 }
 
 void JSC__JSObject__putRecord(JSC__JSObject* object, JSC__JSGlobalObject* global, ZigString* key,
@@ -3759,7 +3830,7 @@ restart:
 
             if (prototypeCount++ < 5) {
                 if (JSValue proto = prototypeObject.getPrototype(globalObject)) {
-                    if (!(proto == globalObject->objectPrototype() || proto == globalObject->functionPrototype())) {
+                    if (!(proto == globalObject->objectPrototype() || proto == globalObject->functionPrototype() || (proto.inherits<JSGlobalProxy>() && jsCast<JSGlobalProxy*>(proto)->target() != globalObject))) {
                         if ((structure = proto.structureOrNull())) {
                             prototypeObject = proto;
                             fast = canPerformFastPropertyEnumerationForIterationBun(structure);
@@ -3778,7 +3849,7 @@ restart:
 
         JSObject* iterating = prototypeObject.getObject();
 
-        while (iterating && !(iterating == globalObject->objectPrototype() || iterating == globalObject->functionPrototype()) && prototypeCount++ < 5) {
+        while (iterating && !(iterating == globalObject->objectPrototype() || iterating == globalObject->functionPrototype() || (iterating->inherits<JSGlobalProxy>() && jsCast<JSGlobalProxy*>(iterating)->target() != globalObject)) && prototypeCount++ < 5) {
             iterating->methodTable()->getOwnPropertyNames(iterating, globalObject, properties, DontEnumPropertiesMode::Include);
             RETURN_IF_EXCEPTION(scope, void());
             for (auto& property : properties) {
@@ -3855,11 +3926,6 @@ restart:
     }
 }
 
-inline bool propertyCompare(const std::pair<String, std::pair<Identifier, JSValue>>& a, const std::pair<String, std::pair<Identifier, JSValue>>& b)
-{
-    return codePointCompare(a.first.impl(), b.first.impl()) < 0;
-}
-
 void JSC__JSValue__forEachPropertyOrdered(JSC__JSValue JSValue0, JSC__JSGlobalObject* globalObject, void* arg2, void (*iter)(JSC__JSGlobalObject* arg0, void* ctx, ZigString* arg2, JSC__JSValue JSValue3, bool isSymbol))
 {
     JSC::JSValue value = JSC::JSValue::decode(JSValue0);
@@ -3868,26 +3934,76 @@ void JSC__JSValue__forEachPropertyOrdered(JSC__JSValue JSValue0, JSC__JSGlobalOb
         return;
 
     JSC::VM& vm = globalObject->vm();
-    auto scope = DECLARE_CATCH_SCOPE(vm);
 
     JSC::PropertyNameArray properties(vm, PropertyNameMode::StringsAndSymbols, PrivateSymbolMode::Exclude);
-    JSC::JSObject::getOwnPropertyNames(object, globalObject, properties, DontEnumPropertiesMode::Include);
+    {
 
-    Vector<std::pair<String, std::pair<Identifier, JSValue>>> ordered_properties;
-    for (auto property : properties) {
-        JSValue propertyValue = object->getDirect(vm, property);
-        ordered_properties.append(std::pair<String, std::pair<Identifier, JSValue>>(property.isSymbol() && !property.isPrivateName() ? property.impl() : property.string(), std::pair<Identifier, JSValue>(property, propertyValue)));
+        auto scope = DECLARE_CATCH_SCOPE(vm);
+        JSC::JSObject::getOwnPropertyNames(object, globalObject, properties, DontEnumPropertiesMode::Include);
+        if (scope.exception()) {
+            scope.clearException();
+            return;
+        }
     }
 
-    std::sort(ordered_properties.begin(), ordered_properties.end(), propertyCompare);
+    auto vector = properties.data()->propertyNameVector();
+    std::sort(vector.begin(), vector.end(), [&](Identifier a, Identifier b) -> bool {
+        const WTF::StringImpl* aImpl = a.isSymbol() && !a.isPrivateName() ? a.impl() : a.string().impl();
+        const WTF::StringImpl* bImpl = b.isSymbol() && !b.isPrivateName() ? b.impl() : b.string().impl();
+        return codePointCompare(aImpl, bImpl) < 0;
+    });
+    auto clientData = WebCore::clientData(vm);
 
-    for (auto item : ordered_properties) {
-        ZigString key = toZigString(item.first);
-        Identifier property = item.second.first;
-        JSValue propertyValue = item.second.second;
+    for (auto property : vector) {
+        if (UNLIKELY(property.isEmpty() || property.isNull()))
+            continue;
+
+        // ignore constructor
+        if (property == vm.propertyNames->constructor || clientData->builtinNames().bunNativePtrPrivateName() == property)
+            continue;
+
+        JSC::PropertySlot slot(object, PropertySlot::InternalMethodType::Get);
+        if (!object->getPropertySlot(globalObject, property, slot))
+            continue;
+
+        if ((slot.attributes() & PropertyAttribute::DontEnum) != 0) {
+            if (property == vm.propertyNames->underscoreProto
+                || property == vm.propertyNames->toStringTagSymbol)
+                continue;
+        }
+
+        JSC::JSValue propertyValue = jsUndefined();
+        auto scope = DECLARE_CATCH_SCOPE(vm);
+        if ((slot.attributes() & PropertyAttribute::DontEnum) != 0) {
+            if ((slot.attributes() & PropertyAttribute::Accessor) != 0) {
+                propertyValue = slot.getPureResult();
+            } else if (slot.attributes() & PropertyAttribute::BuiltinOrFunction) {
+                propertyValue = slot.getValue(globalObject, property);
+            } else if (slot.isCustom()) {
+                propertyValue = slot.getValue(globalObject, property);
+            } else if (slot.isValue()) {
+                propertyValue = slot.getValue(globalObject, property);
+            } else if (object->getOwnPropertySlot(object, globalObject, property, slot)) {
+                propertyValue = slot.getValue(globalObject, property);
+            }
+        } else if ((slot.attributes() & PropertyAttribute::Accessor) != 0) {
+            propertyValue = slot.getPureResult();
+        } else {
+            propertyValue = slot.getValue(globalObject, property);
+        }
+
+        if (UNLIKELY(scope.exception())) {
+            scope.clearException();
+            propertyValue = jsUndefined();
+        }
+
+        const WTF::StringImpl* name = property.isSymbol() && !property.isPrivateName() ? property.impl() : property.string().impl();
+        ZigString key = toZigString(name);
+
         JSC::EnsureStillAliveScope ensureStillAliveScope(propertyValue);
         iter(globalObject, arg2, &key, JSC::JSValue::encode(propertyValue), property.isSymbol());
     }
+    properties.releaseData();
 }
 
 bool JSC__JSValue__isConstructor(JSC__JSValue JSValue0)
@@ -4120,4 +4236,32 @@ CPP_DECL JSC__JSValue WebCore__DOMFormData__create(JSC__JSGlobalObject* arg0)
 CPP_DECL WebCore__DOMFormData* WebCore__DOMFormData__fromJS(JSC__JSValue JSValue1)
 {
     return WebCoreCast<WebCore::JSDOMFormData, WebCore__DOMFormData>(JSValue1);
+}
+
+#pragma mark - JSC::JSMap
+
+CPP_DECL JSC__JSValue JSC__JSMap__create(JSC__JSGlobalObject* arg0)
+{
+    JSC::JSMap* map = JSC::JSMap::create(arg0->vm(), arg0->mapStructure());
+    return JSC::JSValue::encode(map);
+}
+CPP_DECL JSC__JSValue JSC__JSMap__get_(JSC__JSMap* map, JSC__JSGlobalObject* arg1, JSC__JSValue JSValue2)
+{
+    JSC::JSValue value = JSC::JSValue::decode(JSValue2);
+
+    return JSC::JSValue::encode(map->get(arg1, value));
+}
+CPP_DECL bool JSC__JSMap__has(JSC__JSMap* map, JSC__JSGlobalObject* arg1, JSC__JSValue JSValue2)
+{
+    JSC::JSValue value = JSC::JSValue::decode(JSValue2);
+    return map->has(arg1, value);
+}
+CPP_DECL bool JSC__JSMap__remove(JSC__JSMap* map, JSC__JSGlobalObject* arg1, JSC__JSValue JSValue2)
+{
+    JSC::JSValue value = JSC::JSValue::decode(JSValue2);
+    return map->remove(arg1, value);
+}
+CPP_DECL void JSC__JSMap__set(JSC__JSMap* map, JSC__JSGlobalObject* arg1, JSC__JSValue JSValue2, JSC__JSValue JSValue3)
+{
+    map->set(arg1, JSC::JSValue::decode(JSValue2), JSC::JSValue::decode(JSValue3));
 }

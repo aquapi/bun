@@ -2342,6 +2342,11 @@ const Return = struct {
         }
     };
     pub const ReadFile = JSC.Node.StringOrNodeBuffer;
+    pub const ReadFileWithOptions = union(enum) {
+        string: string,
+        buffer: JSC.Node.Buffer,
+        null_terminated: [:0]const u8,
+    };
     pub const Readlink = StringOrBuffer;
     pub const Realpath = StringOrBuffer;
     pub const RealpathNative = Realpath;
@@ -3028,15 +3033,19 @@ pub const NodeFS = struct {
         prefix_buf[len..][0..6].* = "XXXXXX".*;
         prefix_buf[len..][6] = 0;
 
-        const rc = C.mkdtemp(prefix_buf);
-        switch (std.c.getErrno(@ptrToInt(rc))) {
-            .SUCCESS => {},
-            else => |errno| return .{ .err = Syscall.Error{ .errno = @truncate(Syscall.Error.Int, @enumToInt(errno)), .syscall = .mkdtemp } },
-        }
+        // The mkdtemp() function returns  a  pointer  to  the  modified  template
+        // string  on  success, and NULL on failure, in which case errno is set to
+        // indicate the error
 
-        return .{
-            .result = JSC.ZigString.dupeForJS(bun.sliceTo(rc.?, 0), bun.default_allocator) catch unreachable,
-        };
+        const rc = C.mkdtemp(prefix_buf);
+        if (rc) |ptr| {
+            return .{
+                .result = JSC.ZigString.dupeForJS(bun.sliceTo(ptr, 0), bun.default_allocator) catch unreachable,
+            };
+        }
+        // std.c.getErrno(rc) returns SUCCESS if rc is null so we call std.c._errno() directly
+        const errno = @intToEnum(std.c.E, std.c._errno().*);
+        return .{ .err = Syscall.Error{ .errno = @truncate(Syscall.Error.Int, @enumToInt(errno)), .syscall = .mkdtemp } };
     }
     pub fn open(this: *NodeFS, args: Arguments.Open, comptime flavor: Flavor) Maybe(Return.Open) {
         switch (comptime flavor) {
@@ -3283,7 +3292,33 @@ pub const NodeFS = struct {
 
         return Maybe(Return.Readdir).todo;
     }
+
+    pub const StringType = enum {
+        default,
+        null_terminated,
+    };
+
     pub fn readFile(this: *NodeFS, args: Arguments.ReadFile, comptime flavor: Flavor) Maybe(Return.ReadFile) {
+        const ret = readFileWithOptions(this, args, flavor, .default);
+        return switch (ret) {
+            .err => .{ .err = ret.err },
+            .result => switch (ret.result) {
+                .buffer => .{
+                    .result = .{
+                        .buffer = ret.result.buffer,
+                    },
+                },
+                .string => .{
+                    .result = .{
+                        .string = ret.result.string,
+                    },
+                },
+                else => unreachable,
+            },
+        };
+    }
+
+    pub fn readFileWithOptions(this: *NodeFS, args: Arguments.ReadFile, comptime flavor: Flavor, comptime string_type: StringType) Maybe(Return.ReadFileWithOptions) {
         var path: [:0]const u8 = undefined;
         switch (comptime flavor) {
             .sync => {
@@ -3337,7 +3372,7 @@ pub const NodeFS = struct {
                         ),
                         0,
                     ),
-                );
+                ) + if (comptime string_type == .null_terminated) 1 else 0;
 
                 var buf = std.ArrayList(u8).init(bun.default_allocator);
                 buf.ensureTotalCapacityPrecise(size + 16) catch unreachable;
@@ -3387,7 +3422,7 @@ pub const NodeFS = struct {
                     }
                 }
 
-                buf.items.len = total;
+                buf.items.len = if (comptime string_type == .null_terminated) total + 1 else total;
                 if (total == 0) {
                     buf.deinit();
                     return switch (args.encoding) {
@@ -3396,10 +3431,20 @@ pub const NodeFS = struct {
                                 .buffer = Buffer.empty,
                             },
                         },
-                        else => .{
-                            .result = .{
-                                .string = "",
-                            },
+                        else => brk: {
+                            if (comptime string_type == .default) {
+                                break :brk .{
+                                    .result = .{
+                                        .string = "",
+                                    },
+                                };
+                            } else {
+                                break :brk .{
+                                    .result = .{
+                                        .null_terminated = "",
+                                    },
+                                };
+                            }
                         },
                     };
                 }
@@ -3410,10 +3455,20 @@ pub const NodeFS = struct {
                             .buffer = Buffer.fromBytes(buf.items, bun.default_allocator, .Uint8Array),
                         },
                     },
-                    else => .{
-                        .result = .{
-                            .string = buf.items,
-                        },
+                    else => brk: {
+                        if (comptime string_type == .default) {
+                            break :brk .{
+                                .result = .{
+                                    .string = buf.items,
+                                },
+                            };
+                        } else {
+                            break :brk .{
+                                .result = .{
+                                    .null_terminated = buf.toOwnedSliceSentinel(0) catch unreachable,
+                                },
+                            };
+                        }
                     },
                 };
             },
@@ -3498,7 +3553,10 @@ pub const NodeFS = struct {
             }
         }
 
-        _ = ftruncateSync(.{ .fd = fd, .len = @truncate(JSC.WebCore.Blob.SizeType, written) });
+        // https://github.com/oven-sh/bun/issues/2931
+        if ((@enumToInt(args.flag) & std.os.O.APPEND) == 0) {
+            _ = ftruncateSync(.{ .fd = fd, .len = @truncate(JSC.WebCore.Blob.SizeType, written) });
+        }
 
         return Maybe(Return.WriteFile).success;
     }

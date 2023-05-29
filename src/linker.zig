@@ -1,3 +1,5 @@
+// Most of this file should eventually be replaced with `bundle_v2.zig` or
+// `bundle_v2` should be split into several files.
 const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
@@ -39,7 +41,7 @@ const Runtime = @import("./runtime.zig").Runtime;
 const URL = @import("url.zig").URL;
 const JSC = @import("root").bun.JSC;
 const PluginRunner = bun.bundler.PluginRunner;
-pub const CSSResolveError = error{ResolveError};
+pub const CSSResolveError = error{ResolveMessage};
 
 pub const OnImportCallback = *const fn (resolve_result: *const Resolver.Result, import_record: *ImportRecord, origin: URL) void;
 
@@ -793,7 +795,7 @@ pub const Linker = struct {
 
             else => {},
         }
-        if (had_resolve_errors) return error.ResolveError;
+        if (had_resolve_errors) return error.ResolveMessage;
         result.ast.externals = try externals.toOwnedSlice();
 
         //     if (result.ast.needs_runtime and (result.ast.runtime_import_record_id == null or import_records.items.len == 0)) {
@@ -988,12 +990,7 @@ pub const Linker = struct {
         comptime import_path_format: Options.BundleOptions.ImportPathFormat,
     ) !void {
         linker.import_counter += 1;
-        // lazy means:
-        // Run the resolver
-        // Don't parse/print automatically.
-        if (linker.options.resolve_mode != .lazy) {
-            _ = try linker.enqueueResolveResult(resolve_result);
-        }
+
         const path = resolve_result.pathConst() orelse unreachable;
 
         import_record.path = try linker.generateImportPath(
@@ -1007,6 +1004,9 @@ pub const Linker = struct {
 
         switch (loader) {
             .css => {
+                if (!linker.options.target.isBun())
+                    _ = try linker.enqueueResolveResult(resolve_result);
+
                 if (linker.onImportCSS) |callback| {
                     callback(resolve_result, import_record, origin);
                 }

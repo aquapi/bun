@@ -5,6 +5,21 @@ interface VoidFunction {
 declare namespace Bun {
   interface Env extends Dict<string> {
     NODE_ENV: string;
+
+    /**
+     * The timezone used by Intl, Date, etc.
+     *
+     * To change the timezone, set `Bun.env.TZ` or `process.env.TZ` to the time zone you want to use.
+     *
+     * You can view the current timezone with `Intl.DateTimeFormat().resolvedOptions().timeZone`
+     *
+     * @example
+     * ```js
+     * Bun.env.TZ = "America/Los_Angeles";
+     * console.log(Intl.DateTimeFormat().resolvedOptions().timeZone); // "America/Los_Angeles"
+     * ```
+     */
+    TZ?: string;
   }
 }
 
@@ -105,7 +120,7 @@ declare module "bun" {
   /**
    * Synchronously resolve a `moduleId` as though it were imported from `parent`
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    */
   // tslint:disable-next-line:unified-signatures
   export function resolveSync(moduleId: string, parent: string): string;
@@ -113,7 +128,7 @@ declare module "bun" {
   /**
    * Resolve a `moduleId` as though it were imported from `parent`
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    *
    * For now, use the sync version. There is zero performance benefit to using this async version. It exists for future-proofing.
    */
@@ -933,18 +948,19 @@ declare module "bun" {
     scanImports(code: StringOrBuffer): Import[];
   }
 
+  export type ImportKind =
+    | "import-statement"
+    | "require-call"
+    | "require-resolve"
+    | "dynamic-import"
+    | "import-rule"
+    | "url-token"
+    | "internal"
+    | "entry-point";
+
   export interface Import {
     path: string;
-
-    kind:
-      | "import-statement"
-      | "require-call"
-      | "require-resolve"
-      | "dynamic-import"
-      | "import-rule"
-      | "url-token"
-      | "internal"
-      | "entry-point";
+    kind: ImportKind;
   }
 
   type ModuleFormat = "esm"; // later: "cjs", "iife"
@@ -953,8 +969,7 @@ declare module "bun" {
     entrypoints: string[]; // list of file path
     outdir?: string; // output directory
     target?: Target; // default: "browser"
-    // format?: ModuleFormat; // later: "cjs", "iife"
-
+    format?: ModuleFormat; // later: "cjs", "iife"
     naming?:
       | string
       | {
@@ -962,15 +977,16 @@ declare module "bun" {
           entry?: string;
           asset?: string;
         }; // | string;
-    // root?: string; // project root
+    root?: string; // project root
     splitting?: boolean; // default true, enable code splitting
     plugins?: BunPlugin[];
     // manifest?: boolean; // whether to return manifest
     external?: Array<string>;
     publicPath?: string;
+    define?: Record<string, string>;
     // origin?: string; // e.g. http://mydomain.com
-    // loaders?: { [k in string]: Loader };
-    // sourcemap?: "none" | "inline" | "external"; // default: "none"
+    loader?: { [k in string]: Loader };
+    sourcemap?: "none" | "inline" | "external"; // default: "none"
     minify?:
       | boolean
       | {
@@ -979,13 +995,36 @@ declare module "bun" {
           identifiers?: boolean;
         };
     // treeshaking?: boolean;
+
+    // jsx?:
+    //   | "automatic"
+    //   | "classic"
+    //   | /* later: "preserve" */ {
+    //       runtime?: "automatic" | "classic"; // later: "preserve"
+    //       /** Only works when runtime=classic */
+    //       factory?: string; // default: "React.createElement"
+    //       /** Only works when runtime=classic */
+    //       fragment?: string; // default: "React.Fragment"
+    //       /** Only works when runtime=automatic */
+    //       importSource?: string; // default: "react"
+    //     };
   }
 
-  type BuildResult<T = Blob> = {
-    outputs: Array<{ path: string; result: T }>;
-  };
+  interface BuildArtifact extends Blob {
+    path: string;
+    loader: Loader;
+    hash: string | null;
+    kind: "entry-point" | "chunk" | "asset" | "sourcemap";
+    sourcemap: BuildArtifact | null;
+  }
 
-  function build(config: BuildConfig): Promise<BuildResult<Blob>>;
+  interface BuildOutput {
+    outputs: Array<BuildArtifact>;
+    success: boolean;
+    logs: Array<BuildMessage | ResolveMessage>;
+  }
+
+  function build(config: BuildConfig): Promise<BuildOutput>;
 
   /**
    * **0** means the message was **dropped**
@@ -1308,11 +1347,13 @@ declare module "bun" {
     cork: (callback: (ws: ServerWebSocket<T>) => any) => void | Promise<void>;
 
     /**
-     * Configure the {@link WebSocketHandler.message} callback to return a {@link ArrayBuffer} instead of a {@link Uint8Array}
+     * Configure the {@link WebSocketHandler.message} callback to return a {@link ArrayBuffer} or {@link Buffer} instead of a {@link Uint8Array}
      *
-     * @default "uint8array"
+     * @default "nodebuffer"
+     *
+     * In Bun v0.6.2 and earlier, this defaulted to "uint8array"
      */
-    binaryType?: "arraybuffer" | "uint8array";
+    binaryType?: "arraybuffer" | "uint8array" | "nodebuffer";
   }
 
   type WebSocketCompressor =
@@ -1456,16 +1497,18 @@ declare module "bun" {
     closeOnBackpressureLimit?: boolean;
 
     /**
-     * Control whether or not ws.publish() should include the ServerWebSocket
-     * that published the message. This is enabled by default, but it was an API
-     * design mistake. A future version of Bun will change this default to
-     * `false` and eventually remove this option entirely. The better way to publish to all is to use {@link Server.publish}.
+     * Control whether or not ws.publish() should include the `ServerWebSocket`
+     * that published the message.
      *
-     * if `true` or `undefined`, {@link ServerWebSocket.publish} will publish to all subscribers, including the websocket publishing the message.
+     * As of Bun v0.6.3, this option defaults to `false`.
      *
-     * if `false`, {@link ServerWebSocket.publish} will publish to all subscribers excluding the websocket publishing the message.
+     * In Bun v0.6.2 and earlier, this option defaulted to `true`, but it was an API design mistake. A future version of Bun will eventually remove this option entirely. The better way to publish to all is to use {@link Server.publish}.
      *
-     * @default true
+     * if `true` {@link ServerWebSocket.publish} will publish to all subscribers, including the websocket publishing the message.
+     *
+     * if `false` or `undefined`, {@link ServerWebSocket.publish} will publish to all subscribers excluding the websocket publishing the message.
+     *
+     * @default false
      *
      */
     publishToSelf?: boolean;
@@ -1622,12 +1665,16 @@ declare module "bun" {
      * File path to a TLS key
      *
      * To enable TLS, this option is required.
+     *
+     * @deprecated since v0.6.3 - Use `key: Bun.file(path)` instead.
      */
     keyFile: string;
     /**
      * File path to a TLS certificate
      *
      * To enable TLS, this option is required.
+     *
+     * @deprecated since v0.6.3 - Use `cert: Bun.file(path)` instead.
      */
     certFile: string;
 
@@ -1637,6 +1684,8 @@ declare module "bun" {
     passphrase?: string;
     /**
      *  File path to a .pem file for a custom root CA
+     *
+     * @deprecated since v0.6.3 - Use `ca: Bun.file(path)` instead.
      */
     caFile?: string;
 
@@ -1656,6 +1705,57 @@ declare module "bun" {
      * @default false
      */
     lowMemoryMode?: boolean;
+
+    /**
+     * Optionally override the trusted CA certificates. Default is to trust
+     * the well-known CAs curated by Mozilla. Mozilla's CAs are completely
+     * replaced when CAs are explicitly specified using this option.
+     */
+    ca?:
+      | string
+      | Buffer
+      | BunFile
+      | Array<string | Buffer | BunFile>
+      | undefined;
+    /**
+     *  Cert chains in PEM format. One cert chain should be provided per
+     *  private key. Each cert chain should consist of the PEM formatted
+     *  certificate for a provided private key, followed by the PEM
+     *  formatted intermediate certificates (if any), in order, and not
+     *  including the root CA (the root CA must be pre-known to the peer,
+     *  see ca). When providing multiple cert chains, they do not have to
+     *  be in the same order as their private keys in key. If the
+     *  intermediate certificates are not provided, the peer will not be
+     *  able to validate the certificate, and the handshake will fail.
+     */
+    cert?:
+      | string
+      | Buffer
+      | BunFile
+      | Array<string | Buffer | BunFile>
+      | undefined;
+    /**
+     * Private keys in PEM format. PEM allows the option of private keys
+     * being encrypted. Encrypted keys will be decrypted with
+     * options.passphrase. Multiple keys using different algorithms can be
+     * provided either as an array of unencrypted key strings or buffers,
+     * or an array of objects in the form {pem: <string|buffer>[,
+     * passphrase: <string>]}. The object form can only occur in an array.
+     * object.passphrase is optional. Encrypted keys will be decrypted with
+     * object.passphrase if provided, or options.passphrase if it is not.
+     */
+    key?:
+      | string
+      | Buffer
+      | BunFile
+      | Array<string | Buffer | BunFile>
+      | undefined;
+    /**
+     * Optionally affect the OpenSSL protocol behavior, which is not
+     * usually necessary. This should be used carefully if at all! Value is
+     * a numeric bitmask of the SSL_OP_* options from OpenSSL Options
+     */
+    secureOptions?: number | undefined; // Value is a numeric bitmask of the `SSL_OP_*` options
   }
 
   export interface TLSServeOptions extends ServeOptions, TLSOptions {
@@ -1724,7 +1824,7 @@ declare module "bun" {
      * consistently in all cases and it doesn't yet call the `error` handler
      * consistently. This needs to be fixed
      */
-    fetch(request: Request): Response | Promise<Response>;
+    fetch(request: Request | string): Response | Promise<Response>;
 
     /**
      * Upgrade a {@link Request} to a {@link ServerWebSocket}
@@ -2502,7 +2602,13 @@ declare module "bun" {
 
   export type Target =
     /**
-     * The default environment when using `bun run` or `bun` to load a script
+     * For generating bundles that are intended to be run by the Bun runtime. In many cases,
+     * it isn't necessary to bundle server-side code; you can directly execute the source code
+     * without modification. However, bundling your server code can reduce startup times and
+     * improve running performance.
+     *
+     * All bundles generated with `target: "bun"` are marked with a special `// @bun` pragma, which
+     * indicates to the Bun runtime that there's no need to re-transpile the file before execution.
      */
     | "bun"
     /**
@@ -2513,7 +2619,19 @@ declare module "bun" {
      * The plugin will be applied to browser builds
      */
     | "browser";
-  type Loader = "js" | "jsx" | "ts" | "tsx" | "json" | "toml";
+
+  /** https://bun.sh/docs/bundler/loaders */
+  type Loader =
+    | "js"
+    | "jsx"
+    | "ts"
+    | "tsx"
+    | "json"
+    | "toml"
+    | "file"
+    | "napi"
+    | "wasm"
+    | "text";
 
   interface PluginConstraints {
     /**
@@ -2556,7 +2674,7 @@ declare module "bun" {
      *
      * "css" will be added in a future version of Bun.
      */
-    loader: Loader;
+    loader?: Loader;
   }
 
   interface OnLoadResultObject {
@@ -2593,6 +2711,14 @@ declare module "bun" {
      * ```
      */
     path: string;
+    /**
+     * The namespace of the module being loaded
+     */
+    namespace: string;
+    /**
+     * The default loader for this file extension
+     */
+    loader: Loader;
   }
 
   type OnLoadResult = OnLoadResultSourceCode | OnLoadResultObject;
@@ -2609,6 +2735,16 @@ declare module "bun" {
      * The module that imported the module being resolved
      */
     importer: string;
+    /**
+     * The namespace of the importer.
+     */
+    namespace: string;
+    /**
+     * The kind of import this resolve is for.
+     */
+    kind: ImportKind;
+    // resolveDir: string;
+    // pluginData: any;
   }
 
   interface OnResolveResult {
@@ -2625,9 +2761,17 @@ declare module "bun" {
      * ```
      */
     namespace?: string;
+    external: boolean;
   }
 
-  type OnResolveCallback = (args: OnResolveArgs) => OnResolveResult | void;
+  type OnResolveCallback = (
+    args: OnResolveArgs,
+  ) =>
+    | OnResolveResult
+    | Promise<OnResolveResult | void | undefined | null>
+    | void
+    | undefined
+    | null;
 
   interface PluginBuilder {
     /**
@@ -2666,9 +2810,9 @@ declare module "bun" {
       callback: OnResolveCallback,
     ): void;
     /**
-     * The current target environment
+     * The config object passed to `Bun.build` as is. Can be mutated.
      */
-    target: Target;
+    config: BuildConfig & { plugins: BunPlugin[] };
   }
 
   interface BunPlugin {
@@ -2706,7 +2850,7 @@ declare module "bun" {
        * }));
        * ```
        */
-      builder: PluginBuilder,
+      build: PluginBuilder,
     ): void | Promise<void>;
   }
 
@@ -3010,10 +3154,10 @@ declare module "bun" {
    */
   export function connect<Data = undefined>(
     options: TCPSocketConnectOptions<Data>,
-  ): Promise<TCPSocketListener<typeof options>>;
+  ): Promise<Socket<Data>>;
   export function connect<Data = undefined>(
     options: UnixSocketOptions<Data>,
-  ): Promise<UnixSocketListener<typeof options>>;
+  ): Promise<Socket<Data>>;
 
   /**
    *

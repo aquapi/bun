@@ -140,7 +140,7 @@ private:
     void refEventTarget() final { ref(); }
     void derefEventTarget() final { deref(); }
 
-    void didReceiveMessageError(unsigned short code, WTF::StringImpl::StaticStringImpl* reason);
+    void didReceiveMessageError(unsigned short code, WTF::String reason);
     void didUpdateBufferedAmount(unsigned bufferedAmount);
     void didStartClosingHandshake();
 
@@ -164,7 +164,9 @@ private:
     void failAsynchronously();
 
     enum class BinaryType { Blob,
-        ArrayBuffer };
+        ArrayBuffer,
+        // non-standard:
+        NodeBuffer };
 
     State m_state { CONNECTING };
     URL m_url;

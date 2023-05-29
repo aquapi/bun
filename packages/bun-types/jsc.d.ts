@@ -1,6 +1,9 @@
 declare module "bun:jsc" {
-  export function describe(value: any): string;
-  export function describeArray(args: any[]): string;
+  /**
+   * This used to be called "describe" but it could be confused with the test runner.
+   */
+  export function jscDescribe(value: any): string;
+  export function jscDescribeArray(args: any[]): string;
   export function gcAndSweep(): number;
   export function fullGC(): number;
   export function edenGC(): number;
@@ -35,6 +38,18 @@ declare module "bun:jsc" {
   export function totalCompileTime(func: Function): number;
   export function reoptimizationRetryCount(func: Function): number;
   export function drainMicrotasks(): void;
+
+  /**
+   * Set the timezone used by Intl, Date, etc.
+   *
+   * @param timeZone A string representing the time zone to use, such as "America/Los_Angeles"
+   *
+   * @returns The normalized time zone string
+   *
+   * You can also set process.env.TZ to the time zone you want to use.
+   * You can also view the current timezone with `Intl.DateTimeFormat().resolvedOptions().timeZone`
+   */
+  export function setTimeZone(timeZone: string): string;
 
   /**
    * Run JavaScriptCore's sampling profiler for a particular function
