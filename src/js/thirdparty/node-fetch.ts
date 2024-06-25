@@ -56,12 +56,12 @@ class Response extends WebResponse {
   }
 
   get body() {
-    let body = this[kBody];
+    const body = this[kBody];
     if (!body) {
-      var web = super.body;
+      const web = super.body;
       if (!web) return null;
       if (!BodyReadable) loadBodyReadable();
-      body = this[kBody] = new BodyReadable({}, web);
+      return this[kBody] = new BodyReadable({}, web);
     }
 
     return body;
@@ -114,11 +114,7 @@ class Response extends WebResponse {
   }
 
   get type() {
-    if (!super.ok) {
-      return "error";
-    }
-
-    return "default";
+    return super.ok ? "default" : "error";
   }
 }
 var ResponsePrototype = Response.prototype;
@@ -156,21 +152,15 @@ class Request extends WebRequest {
  */
 async function fetch(url: any, init?: RequestInit & { body?: any }) {
   // input node stream -> web stream
-  let body: s.Readable | undefined = init?.body;
-  if (body) {
-    const chunks: any = [];
-    const { Readable } = require("node:stream");
-    if (body instanceof Readable) {
-      // TODO: Bun fetch() doesn't support ReadableStream at all.
-      for await (const chunk of body) {
-        chunks.push(chunk);
-      }
-      init = { ...init, body: new Blob(chunks) };
-    }
-  }
+  const body: s.Readable | undefined = init?.body;
 
-  const response = await nativeFetch(url, init);
+  const response = await nativeFetch(url, 
+    body instanceof require("node:stream").Readable
+      ? { ...init, body: Readable.toWeb(body) }
+      : init;
+  );
   Object.setPrototypeOf(response, ResponsePrototype);
+  
   return response;
 }
 
